@@ -2,13 +2,12 @@ name: Brisa Mail Otomasyon
 
 on:
   schedule:
-    # Her 15 dakikada bir çalış (UTC, Türkiye UTC+3)
     - cron: '*/15 * * * *'
-  workflow_dispatch:  # Elle de çalıştırılabilir
+  workflow_dispatch:
 
 jobs:
   calistir:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
 
     steps:
@@ -25,7 +24,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Playwright tarayıcısını yükle
-        run: playwright install chromium --with-deps
+        run: |
+          pip install playwright
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
 
       - name: Veritabanını önbellekten al
         uses: actions/cache@v4
