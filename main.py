@@ -600,10 +600,6 @@ def main():
     yeniden_eslesti = 0
 
     for item in bekleyenler:
-        numaralar = json.loads(item["numaralar"])
-        eslesme   = eslestir(numaralar, referans)
-
-        if eslesme:
             sheets_eslesmeyiKaydet(
                 item["gonderen"], item["konu"], item["tarih"],
                 eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"]
