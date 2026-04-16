@@ -600,22 +600,38 @@ def main():
     yeniden_eslesti = 0
 
     for item in bekleyenler:
-            sheets_eslesmeyiKaydet(
-                item["gonderen"], item["konu"], item["tarih"],
-                eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"]
-            )
-            html = bildirim_html(
-                item["gonderen"], item["konu"], item["tarih"],
-                eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"]
-            )
-            gmail_mail_gonder(
-                gmail,
-                f"✅ Fatura Eşleşmesi — Dosya No: {eslesme['dosya_no']}",
-                html
-            )
-            db_islendi_ekle(conn, item["email_id"], eslesme["dosya_no"])
-            db_bekleyeni_sil(conn, item["id"])
-            yeniden_eslesti += 1
+        try:
+            numaralar_json = item.get("numaralar") or "{}"
+            numaralar_item = json.loads(numaralar_json)
+        except Exception:
+            continue
+
+        eslesme_b = eslestir(numaralar_item, referans)
+        if not eslesme_b:
+            continue
+
+        item_gonderen = item.get("gonderen", "")
+        item_konu     = item.get("konu", "")
+        item_tarih    = item.get("tarih", "")
+        item_email_id = item.get("email_id", "")
+        item_id       = item.get("id", 0)
+
+        sheets_eslesmeyiKaydet(
+            item_gonderen, item_konu, item_tarih,
+            eslesme_b["dosya_no"], eslesme_b["kriter"], eslesme_b["deger"]
+        )
+        html = bildirim_html(
+            item_gonderen, item_konu, item_tarih,
+            eslesme_b["dosya_no"], eslesme_b["kriter"], eslesme_b["deger"]
+        )
+        gmail_mail_gonder(
+            gmail,
+            f"✅ Fatura Eşleşmesi — Dosya No: {eslesme_b['dosya_no']}",
+            html
+        )
+        db_islendi_ekle(conn, item_email_id, eslesme_b["dosya_no"])
+        db_bekleyeni_sil(conn, item_id)
+        yeniden_eslesti += 1
 
     log.info(
         f"═══ Bitti → Eşleşti: {eslesti} | "
