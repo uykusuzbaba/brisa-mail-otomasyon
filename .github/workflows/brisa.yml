@@ -36,7 +36,8 @@ jobs:
           key: brisa-db-${{ github.run_number }}
           restore-keys: brisa-db-
 
-      - name: Sistemi çalıştır
+      - name: DB sıfırla
+        run: python reset_db.py
         env:
           GOOGLE_API_KEY:      ${{ secrets.GOOGLE_API_KEY }}
           GMAIL_TOKEN_JSON:    ${{ secrets.GMAIL_TOKEN_JSON }}
