@@ -451,8 +451,16 @@ def eslestir(numaralar, referans):
 #  BİLDİRİM MAİLİ
 # ════════════════════════════════════════════════════════════
 
-def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger):
+def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger, fatura_url=None):
     simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
+    url_satiri = ""
+    if fatura_url:
+        url_satiri = (
+            "<tr><td style=\"padding:10px 14px;color:#666;width:40%\">Fatura Linki</td>"
+            "<td style=\"padding:10px 14px\">"
+            f"<a href=\"{fatura_url}\" style=\"color:#1a5276;font-weight:500\">"
+            "🔗 Faturayı Görüntüle →</a></td></tr>"
+        )
     return f"""
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
 <div style="background:#1a5276;color:white;padding:20px;border-radius:8px 8px 0 0">
@@ -473,6 +481,7 @@ def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger):
         <td style="padding:10px 14px;font-weight:500">{konu}</td></tr>
     <tr><td style="padding:10px 14px;color:#666">Mail Tarihi</td>
         <td style="padding:10px 14px;font-weight:500">{tarih}</td></tr>
+    {url_satiri}
     <tr style="background:#eaf0fb"><th colspan="2" style="padding:10px 14px;
         text-align:left;color:#1a5276;font-size:12px">EŞLEŞme DETAYI</th></tr>
     <tr><td style="padding:10px 14px;color:#666">Eşleşen Kriter</td>
@@ -570,7 +579,8 @@ def main():
             )
             html = bildirim_html(
                 gonderen, konu, tarih,
-                eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"]
+                eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"],
+                fatura_url=url
             )
             gmail_mail_gonder(
                 gmail,
