@@ -524,8 +524,11 @@ def main():
         tarih    = mail["tarih"]
 
         if db_islendi_mi(conn, email_id):
+            log.info(f"Daha önce işlendi, atlanıyor: {email_id}")
             gmail_okundu_isaretle(gmail, email_id)
             continue
+
+        log.info(f"Yeni mail işleniyor: {konu} | {gonderen}")
 
         # Mail gövdesinden linki bul
         govde = gmail_govde_al(mail["payload"])
