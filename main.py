@@ -360,11 +360,33 @@ def sheets_referans_veri():
     kayitlar = []
     for row in rows[1:]:
         padded = row + [None] * (4 - len(row))
+        dosya = str(padded[3]).strip() if padded[3] else None
+        if not dosya:
+            continue
+
+        # Konteyner sütununda virgülle ayrılmış birden fazla numara olabilir
+        # Örnek: "ARKU2438358, TCKU1234567, MSCU9876543"
+        konteyner_ham = str(padded[1]) if padded[1] else ""
+        konteyner_listesi = [
+            _norm(k) for k in konteyner_ham.split(",") if k.strip()
+        ]
+
+        # Konşimento ve Beyanname da virgülle gelebilir
+        konsimento_ham = str(padded[0]) if padded[0] else ""
+        konsimento_listesi = [
+            _norm(k) for k in konsimento_ham.split(",") if k.strip()
+        ]
+
+        beyanname_ham = str(padded[2]) if padded[2] else ""
+        beyanname_listesi = [
+            _norm(k) for k in beyanname_ham.split(",") if k.strip()
+        ]
+
         kayitlar.append({
-            "konsimento": _norm(padded[0]),
-            "konteyner":  _norm(padded[1]),
-            "beyanname":  _norm(padded[2]),
-            "dosya_no":   str(padded[3]).strip() if padded[3] else None,
+            "konsimento_listesi": konsimento_listesi,
+            "konteyner_listesi":  konteyner_listesi,
+            "beyanname_listesi":  beyanname_listesi,
+            "dosya_no":           dosya,
         })
 
     log.info(f"Sheets'ten {len(kayitlar)} kayıt okundu.")
@@ -428,21 +450,34 @@ def _norm(v):
 
 
 def eslestir(numaralar, referans):
-    konsimentolar = [_norm(v) for v in numaralar.get("konsimento_list", []) if v]
-    konteynerlar  = [_norm(v) for v in numaralar.get("konteyner_list",  []) if v]
-    beyannameler  = [_norm(v) for v in numaralar.get("beyanname_list",  []) if v]
+    """
+    Faturadan çıkarılan numaraları Sheets referans listesiyle karşılaştırır.
+    Sheets'te virgülle ayrılmış birden fazla konteyner/konşimento/beyanname
+    numarası desteklenir.
+    """
+    f_konsimentolar = [_norm(v) for v in numaralar.get("konsimento_list", []) if v]
+    f_konteynerlar  = [_norm(v) for v in numaralar.get("konteyner_list",  []) if v]
+    f_beyannameler  = [_norm(v) for v in numaralar.get("beyanname_list",  []) if v]
 
     for row in referans:
         dosya = row.get("dosya_no")
         if not dosya:
             continue
 
-        if row["konsimento"] and row["konsimento"] in konsimentolar:
-            return {"dosya_no": dosya, "kriter": "Konşimento No", "deger": row["konsimento"]}
-        if row["konteyner"] and row["konteyner"] in konteynerlar:
-            return {"dosya_no": dosya, "kriter": "Konteyner No",  "deger": row["konteyner"]}
-        if row["beyanname"] and row["beyanname"] in beyannameler:
-            return {"dosya_no": dosya, "kriter": "Beyanname No",  "deger": row["beyanname"]}
+        # Konşimento eşleşmesi
+        for r_kon in row.get("konsimento_listesi", []):
+            if r_kon and r_kon in f_konsimentolar:
+                return {"dosya_no": dosya, "kriter": "Konşimento No", "deger": r_kon}
+
+        # Konteyner eşleşmesi (virgülle ayrılmış birden fazla olabilir)
+        for r_knt in row.get("konteyner_listesi", []):
+            if r_knt and r_knt in f_konteynerlar:
+                return {"dosya_no": dosya, "kriter": "Konteyner No", "deger": r_knt}
+
+        # Beyanname eşleşmesi
+        for r_bey in row.get("beyanname_listesi", []):
+            if r_bey and r_bey in f_beyannameler:
+                return {"dosya_no": dosya, "kriter": "Beyanname No", "deger": r_bey}
 
     return None
 
