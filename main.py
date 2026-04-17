@@ -452,42 +452,63 @@ def _norm(v):
 def eslestir(numaralar, referans):
     """
     Faturadan çıkarılan numaraları Sheets referans listesiyle karşılaştırır.
-    Sheets'te virgülle ayrılmış birden fazla konteyner/konşimento/beyanname
-    numarası desteklenir.
+    TÜM eşleşmeleri döndürür — aynı konşimento/konteyner için birden fazla
+    dosya (beyanname) olabilir, hepsi tek mailde gösterilir.
     """
     f_konsimentolar = [_norm(v) for v in numaralar.get("konsimento_list", []) if v]
     f_konteynerlar  = [_norm(v) for v in numaralar.get("konteyner_list",  []) if v]
     f_beyannameler  = [_norm(v) for v in numaralar.get("beyanname_list",  []) if v]
 
+    eslesmeler = []
+    gorulmus_dosyalar = set()  # Aynı dosyayı iki kez eklememek için
+
     for row in referans:
         dosya = row.get("dosya_no")
-        if not dosya:
+        if not dosya or dosya in gorulmus_dosyalar:
             continue
 
         # Konşimento eşleşmesi
         for r_kon in row.get("konsimento_listesi", []):
             if r_kon and r_kon in f_konsimentolar:
-                return {"dosya_no": dosya, "kriter": "Konşimento No", "deger": r_kon}
+                eslesmeler.append({"dosya_no": dosya, "kriter": "Konşimento No", "deger": r_kon})
+                gorulmus_dosyalar.add(dosya)
+                break
 
-        # Konteyner eşleşmesi (virgülle ayrılmış birden fazla olabilir)
+        if dosya in gorulmus_dosyalar:
+            continue
+
+        # Konteyner eşleşmesi
         for r_knt in row.get("konteyner_listesi", []):
             if r_knt and r_knt in f_konteynerlar:
-                return {"dosya_no": dosya, "kriter": "Konteyner No", "deger": r_knt}
+                eslesmeler.append({"dosya_no": dosya, "kriter": "Konteyner No", "deger": r_knt})
+                gorulmus_dosyalar.add(dosya)
+                break
+
+        if dosya in gorulmus_dosyalar:
+            continue
 
         # Beyanname eşleşmesi
         for r_bey in row.get("beyanname_listesi", []):
             if r_bey and r_bey in f_beyannameler:
-                return {"dosya_no": dosya, "kriter": "Beyanname No", "deger": r_bey}
+                eslesmeler.append({"dosya_no": dosya, "kriter": "Beyanname No", "deger": r_bey})
+                gorulmus_dosyalar.add(dosya)
+                break
 
-    return None
+    return eslesmeler if eslesmeler else None
 
 
 # ════════════════════════════════════════════════════════════
 #  BİLDİRİM MAİLİ
 # ════════════════════════════════════════════════════════════
 
-def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger, fatura_url=None):
+def bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=None):
+    """
+    eslesmeler: [{"dosya_no": ..., "kriter": ..., "deger": ...}, ...]
+    Birden fazla eşleşme tek mailde gösterilir.
+    """
     simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Fatura linki satırı
     url_satiri = ""
     if fatura_url:
         url_satiri = (
@@ -496,6 +517,29 @@ def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger, fatura_url=Non
             f"<a href=\"{fatura_url}\" style=\"color:#1a5276;font-weight:500\">"
             "🔗 Faturayı Görüntüle →</a></td></tr>"
         )
+
+    # Eşleşen dosyalar bölümü
+    dosya_satirlari = ""
+    for i, e in enumerate(eslesmeler, 1):
+        baslik = f"{i}. EŞLEŞEN DOSYA" if len(eslesmeler) > 1 else "EŞLEŞme DETAYI"
+        dosya_satirlari += f"""
+    <tr style="background:#eaf0fb"><th colspan="2" style="padding:10px 14px;
+        text-align:left;color:#1a5276;font-size:12px">{baslik}</th></tr>
+    <tr><td style="padding:10px 14px;color:#666;width:40%">Dosya No</td>
+        <td style="padding:10px 14px;font-weight:700;font-size:15px;
+            color:#1a5276">{e["dosya_no"]}</td></tr>
+    <tr><td style="padding:10px 14px;color:#666">Eşleşen Kriter</td>
+        <td style="padding:10px 14px;font-weight:700;color:#1a7a4a">{e["kriter"]}</td></tr>
+    <tr><td style="padding:10px 14px;color:#666">Eşleşen Değer</td>
+        <td style="padding:10px 14px;font-weight:700;color:#1a7a4a">{e["deger"]}</td></tr>"""
+
+    # Başlık için dosya no özeti
+    if len(eslesmeler) == 1:
+        baslik_dosya = f"📂 Dosya No: {eslesmeler[0]['dosya_no']}"
+    else:
+        dosyalar = ", ".join(e["dosya_no"] for e in eslesmeler)
+        baslik_dosya = f"📂 {len(eslesmeler)} Dosya Eşleşti: {dosyalar}"
+
     return f"""
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
 <div style="background:#1a5276;color:white;padding:20px;border-radius:8px 8px 0 0">
@@ -503,9 +547,9 @@ def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger, fatura_url=Non
   <p style="margin:6px 0 0;font-size:13px;opacity:.8">{simdi}</p>
 </div>
 <div style="background:#f8f9fa;padding:24px;border:1px solid #dee2e6;border-top:none">
-  <div style="background:#1a5276;color:white;font-size:24px;font-weight:700;
+  <div style="background:#1a5276;color:white;font-size:20px;font-weight:700;
        padding:18px;border-radius:8px;text-align:center;margin-bottom:20px">
-    📂 Dosya No: {dosya_no}
+    {baslik_dosya}
   </div>
   <table style="width:100%;border-collapse:collapse;background:white;border-radius:6px">
     <tr style="background:#eaf0fb"><th colspan="2" style="padding:10px 14px;
@@ -517,15 +561,7 @@ def bildirim_html(gonderen, konu, tarih, dosya_no, kriter, deger, fatura_url=Non
     <tr><td style="padding:10px 14px;color:#666">Mail Tarihi</td>
         <td style="padding:10px 14px;font-weight:500">{tarih}</td></tr>
     {url_satiri}
-    <tr style="background:#eaf0fb"><th colspan="2" style="padding:10px 14px;
-        text-align:left;color:#1a5276;font-size:12px">EŞLEŞme DETAYI</th></tr>
-    <tr><td style="padding:10px 14px;color:#666">Eşleşen Kriter</td>
-        <td style="padding:10px 14px;font-weight:700;color:#1a7a4a">{kriter}</td></tr>
-    <tr><td style="padding:10px 14px;color:#666">Eşleşen Değer</td>
-        <td style="padding:10px 14px;font-weight:700;color:#1a7a4a">{deger}</td></tr>
-    <tr><td style="padding:10px 14px;color:#666">Dosya No</td>
-        <td style="padding:10px 14px;font-weight:700;font-size:16px;
-            color:#1a5276">{dosya_no}</td></tr>
+    {dosya_satirlari}
   </table>
 </div>
 <div style="padding:12px;text-align:center;font-size:12px;color:#888;
@@ -607,25 +643,26 @@ def main():
             f"| Beyanname: {len(numaralar['beyanname_list'])}"
         )
 
-        # Eşleştir
-        eslesme = eslestir(numaralar, referans)
+        # Eşleştir — birden fazla dosya eşleşebilir
+        eslesmeler = eslestir(numaralar, referans)
 
-        if eslesme:
-            sheets_eslesmeyiKaydet(
-                gonderen, konu, tarih,
-                eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"]
-            )
-            html = bildirim_html(
-                gonderen, konu, tarih,
-                eslesme["dosya_no"], eslesme["kriter"], eslesme["deger"],
-                fatura_url=url
-            )
+        if eslesmeler:
+            # Her eşleşmeyi Sheets'e kaydet
+            for e in eslesmeler:
+                sheets_eslesmeyiKaydet(
+                    gonderen, konu, tarih,
+                    e["dosya_no"], e["kriter"], e["deger"]
+                )
+
+            # Tüm eşleşmeleri tek mailde gönder
+            dosyalar_str = ", ".join(e["dosya_no"] for e in eslesmeler)
+            html = bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=url)
             gmail_mail_gonder(
                 gmail,
-                f"✅ Fatura Eşleşmesi — Dosya No: {eslesme['dosya_no']}",
+                f"✅ Fatura Eşleşmesi — {len(eslesmeler)} Dosya: {dosyalar_str}",
                 html
             )
-            db_islendi_ekle(conn, email_id, eslesme["dosya_no"])
+            db_islendi_ekle(conn, email_id, dosyalar_str)
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
@@ -644,8 +681,8 @@ def main():
         except Exception:
             continue
 
-        eslesme_b = eslestir(numaralar_item, referans)
-        if not eslesme_b:
+        eslesmeler_b = eslestir(numaralar_item, referans)
+        if not eslesmeler_b:
             continue
 
         item_gonderen = item.get("gonderen", "")
@@ -654,20 +691,20 @@ def main():
         item_email_id = item.get("email_id", "")
         item_id       = item.get("id", 0)
 
-        sheets_eslesmeyiKaydet(
-            item_gonderen, item_konu, item_tarih,
-            eslesme_b["dosya_no"], eslesme_b["kriter"], eslesme_b["deger"]
-        )
-        html = bildirim_html(
-            item_gonderen, item_konu, item_tarih,
-            eslesme_b["dosya_no"], eslesme_b["kriter"], eslesme_b["deger"]
-        )
+        for e in eslesmeler_b:
+            sheets_eslesmeyiKaydet(
+                item_gonderen, item_konu, item_tarih,
+                e["dosya_no"], e["kriter"], e["deger"]
+            )
+
+        dosyalar_str_b = ", ".join(e["dosya_no"] for e in eslesmeler_b)
+        html = bildirim_html(item_gonderen, item_konu, item_tarih, eslesmeler_b)
         gmail_mail_gonder(
             gmail,
-            f"✅ Fatura Eşleşmesi — Dosya No: {eslesme_b['dosya_no']}",
+            f"✅ Fatura Eşleşmesi — {len(eslesmeler_b)} Dosya: {dosyalar_str_b}",
             html
         )
-        db_islendi_ekle(conn, item_email_id, eslesme_b["dosya_no"])
+        db_islendi_ekle(conn, item_email_id, dosyalar_str_b)
         db_bekleyeni_sil(conn, item_id)
         yeniden_eslesti += 1
 
