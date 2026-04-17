@@ -416,7 +416,7 @@ def sheets_eslesmeyiKaydet(gonderen, konu, tarih, dosya_no, kriter, deger):
         log.error(f"Sheets yazma hatası: {e}")
 
 
-def sheets_okunamayanEkle(gonderen, konu, tarih, sebep):
+def sheets_okunamayanEkle(gonderen, konu, tarih, sebep, fatura_url=None):
     token_data = json.loads(GMAIL_TOKEN_JSON)
     creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
     if creds.expired and creds.refresh_token:
@@ -428,11 +428,11 @@ def sheets_okunamayanEkle(gonderen, konu, tarih, sebep):
     try:
         servis.spreadsheets().values().append(
             spreadsheetId=SHEETS_ID,
-            range="⚠️ Okunamayanlar!A:G",
+            range="⚠️ Okunamayanlar!A:H",
             valueInputOption="RAW",
             body={"values": [[
                 simdi, tarih, gonderen, konu,
-                "fatura-link", sebep
+                "fatura-link", sebep, fatura_url or ""
             ]]}
         ).execute()
     except HttpError as e:
@@ -615,7 +615,7 @@ def main():
 
         if not icerik:
             log.error(f"Sayfa okunamadı: {url[:80]}")
-            sheets_okunamayanEkle(gonderen, konu, tarih, "Sayfa açılamadı")
+            sheets_okunamayanEkle(gonderen, konu, tarih, "Sayfa açılamadı", fatura_url=url)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
             continue
@@ -631,7 +631,8 @@ def main():
             log.info(f"Numara bulunamadı: {konu}")
             sheets_okunamayanEkle(
                 gonderen, konu, tarih,
-                "Konşimento/Konteyner/Beyanname bulunamadı"
+                "Konşimento/Konteyner/Beyanname bulunamadı",
+                fatura_url=url
             )
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
