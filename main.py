@@ -335,39 +335,86 @@ def linkten_url_bul(html_govde):
 #  GEMİNİ — NUMARA ÇIKARIMI
 # ════════════════════════════════════════════════════════════
 
-def gemini_numaralari_kadir(metin):
-    """Claude Haiku ile numara çıkarımı."""
+def regex_ile_numaralari_cek(metin):
+    """
+    Uluslararası standart formatlarla regex tabanlı numara çıkarımı.
+    Claude'a gitmeden önce çalışır — hızlı ve ücretsiz.
 
+    Konteyner: ISO 6346 — 4 büyük harf + 7 rakam (ör: MSMU7499454)
+    Beyanname: Türk Gümrük — 5 rakam + 2 harf (IM/AN/EX..) + 8 rakam
+               mutlaka 00IM0 veya 00AN0 veya 00EX0 gibi bir pattern içerir
+    Konşimento: Değişken format — harf+rakam karışımı 8-20 karakter
+                "Konşimento", "B/L", "BL" etiketlerinin yanında aranır
+    """
+    if not metin:
+        return None
+
+    metin_upper = metin.upper()
+
+    # ── Konteyner (ISO 6346): 4 büyük harf + 7 rakam ────────
+    konteyner_pattern = r'\b([A-Z]{4}[0-9]{7})\b'
+    konteynerler = list(set(re.findall(konteyner_pattern, metin_upper)))
+    # Fatura no gibi YLP... ile başlayanları ele
+    konteynerler = [k for k in konteynerler if not k.startswith('YLP')]
+
+    # ── Beyanname (Türk Gümrük): rakam+IM/AN/EX/IH+rakam ────
+    beyanname_pattern = r'\b(\d{5}[A-Z]{2}\d{8})\b'
+    beyannameler = list(set(re.findall(beyanname_pattern, metin_upper)))
+    # Sadece bilinen Türk gümrük tip kodlarını al
+    tip_kodlari = ['IM', 'AN', 'EX', 'IH', 'TR', 'TI', 'AB', 'AT']
+    beyannameler = [b for b in beyannameler
+                    if any(b[5:7] == tip for tip in tip_kodlari)]
+
+    # ── Konşimento: etiket yanındaki alfanümerik kod ──────────
+    konsimentolar = []
+    kon_etiket = r'(?:Kon[şs]imento|B/?L|Bill of Lading|BL No)[^A-Z0-9]{0,10}([A-Z0-9]{6,20})'
+    for m in re.finditer(kon_etiket, metin_upper):
+        kod = m.group(1).strip()
+        if kod and not kod.startswith('YLP') and not kod.startswith('TR1'):
+            konsimentolar.append(kod)
+    konsimentolar = list(set(konsimentolar))
+
+    sonuc = {
+        "konsimento_list": konsimentolar,
+        "konteyner_list":  konteynerler,
+        "beyanname_list":  beyannameler,
+    }
+
+    hic_yok = not any([konsimentolar, konteynerler, beyannameler])
+    return None if hic_yok else sonuc
+
+
+def claude_ile_numaralari_cek(metin):
+    """
+    Claude Haiku ile numara çıkarımı.
+    Sadece regex başarısız olduğunda çağrılır.
+    """
     prompt = (
-        "Aşağıdaki metin bir lojistik/gümrük faturasına ait sayfa içeriğidir.\n"
-        "Bu metinden 3 tür numara çıkar:\n\n"
+        "Aşağıdaki metin bir Türk lojistik/gümrük e-faturasına ait sayfa içeriğidir.\n"
+        "Bu metinden 3 tür numara çıkar. Numaralar 'Not' satırlarında yazıyor olabilir.\n\n"
 
-        "1. KONŞİMENTO NUMARASI (Bill of Lading, B/L No, Konşimento)\n"
-        "   Örnek: SPE041901781, HLCUIST2501XXXXX\n\n"
+        "1. KONŞİMENTO NUMARASI (Konşimento, B/L, Bill of Lading etiketleri)\n"
+        "   Örnek: SPE041901781, MEDUFB089573\n\n"
 
-        "2. KONTEYNER NUMARASI (4 büyük harf + 7 rakam formatı)\n"
-        "   Etiket olmasa da bu formattaki her kodu al\n"
-        "   Örnek: ARKU2438358, TCKU1234567\n\n"
+        "2. KONTEYNER NUMARASI — ISO 6346 standardı\n"
+        "   Format: Tam olarak 4 büyük harf + 7 rakam\n"
+        "   Örnek: ARKU2438358, MSMU7499454\n\n"
 
-        "3. BEYANNAME NUMARASI (Beyanname No, Gümrük Beyannamesi)\n"
-        "   Türk gümrük formatı: rakam+harf karışımı\n"
+        "3. BEYANNAME NUMARASI — Türk Gümrük formatı\n"
+        "   Format: 5 rakam + 2 harf (IM/AN/EX..) + 8 rakam\n"
         "   Örnek: 26410500IM00045784\n\n"
 
-        "KURALLAR:\n"
-        "- Fatura no, vergi no, GUID gibi alakasız numaraları alma\n"
-        "- Aynı numara birden fazla geçiyorsa bir kez yaz\n"
-        "- Hiç bulunamazsa boş liste döndür\n\n"
-
-        "SADECE JSON döndür, başka hiçbir şey yazma:\n"
+        "- Fatura no (YLP...), ETTN, GUID, vergi no alma\n"
+        "- SADECE JSON döndür:\n"
         '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
-        f"--- FATURA İÇERİĞİ ---\n{metin[:12000]}\n--- BİTİŞ ---"
+        f"--- FATURA ---\n{metin[:10000]}\n--- BİTİŞ ---"
     )
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+            max_tokens=400,
             messages=[{"role": "user", "content": prompt}]
         )
         raw = message.content[0].text
@@ -376,11 +423,37 @@ def gemini_numaralari_kadir(metin):
         sonuc.setdefault("konsimento_list", [])
         sonuc.setdefault("konteyner_list", [])
         sonuc.setdefault("beyanname_list", [])
-        return sonuc
+
+        hic_yok = not any([
+            sonuc["konsimento_list"],
+            sonuc["konteyner_list"],
+            sonuc["beyanname_list"]
+        ])
+        return None if hic_yok else sonuc
 
     except Exception as e:
         log.error(f"Claude hatası: {e}")
         return None
+
+
+def gemini_numaralari_kadir(metin):
+    """
+    Hibrit numara çıkarım motoru:
+    1. Önce regex ile standart formatlarda ara (hızlı, ücretsiz)
+    2. Bulamazsa Claude Haiku'ya gönder (yavaş, ücretli ama güvenilir)
+    """
+    # Adım 1: Regex
+    sonuc = regex_ile_numaralari_cek(metin)
+    if sonuc:
+        log.info(f"Regex ile bulundu → "
+                 f"Konşimento: {len(sonuc['konsimento_list'])} "
+                 f"| Konteyner: {len(sonuc['konteyner_list'])} "
+                 f"| Beyanname: {len(sonuc['beyanname_list'])}")
+        return sonuc
+
+    # Adım 2: Claude
+    log.info("Regex bulamadı, Claude'a gönderiliyor...")
+    return claude_ile_numaralari_cek(metin)
 
 
 # ════════════════════════════════════════════════════════════
