@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import gspread
+import anthropic
 import requests
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -34,6 +34,7 @@ GOOGLE_API_KEY       = os.environ["GOOGLE_API_KEY"]
 GMAIL_TOKEN_JSON     = os.environ["GMAIL_TOKEN_JSON"]       # token.json içeriği
 SHEETS_ID            = os.environ["SHEETS_ID"]
 BILDIRIM_ALICISI     = os.environ["BILDIRIM_ALICISI"]
+ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 GONDEREN_LISTESI     = os.environ.get("GONDEREN_LISTESI", "m.hizmet@brisa.com.tr").split(",")
 SORGU_PENCERESI_GUN  = int(os.environ.get("SORGU_PENCERESI_GUN", "60"))
 
@@ -335,62 +336,50 @@ def linkten_url_bul(html_govde):
 # ════════════════════════════════════════════════════════════
 
 def gemini_numaralari_kadir(metin):
+    """Claude Haiku ile numara çıkarımı."""
+
     prompt = (
         "Aşağıdaki metin bir lojistik/gümrük faturasına ait sayfa içeriğidir.\n"
-        "Bu metinden 3 tür numara çıkarmanı istiyorum.\n\n"
+        "Bu metinden 3 tür numara çıkar:\n\n"
 
-        "1. KONŞİMENTO NUMARASI:\n"
-        "   Konşimento, Konşimento No, B/L, BL No etiketlerinin yanındaki kodlar\n"
+        "1. KONŞİMENTO NUMARASI (Bill of Lading, B/L No, Konşimento)\n"
         "   Örnek: SPE041901781, HLCUIST2501XXXXX\n\n"
 
-        "2. KONTEYNER NUMARASI:\n"
-        "   Tam olarak 4 büyük harf + 7 rakam formatındaki kodlar\n"
-        "   Etiket olmadan sadece numara da yazabilir\n"
+        "2. KONTEYNER NUMARASI (4 büyük harf + 7 rakam formatı)\n"
+        "   Etiket olmasa da bu formattaki her kodu al\n"
         "   Örnek: ARKU2438358, TCKU1234567\n\n"
 
-        "3. BEYANNAME NUMARASI:\n"
-        "   Beyanname, Beyanname No, Gümrük Beyannamesi etiketlerinin yanındaki kodlar\n"
+        "3. BEYANNAME NUMARASI (Beyanname No, Gümrük Beyannamesi)\n"
         "   Türk gümrük formatı: rakam+harf karışımı\n"
         "   Örnek: 26410500IM00045784\n\n"
 
-        "ÖNEMLİ KURALLAR:\n"
-        "- Etiket olmasa bile 4 harf+7 rakam formatındaki her kodu konteyner olarak al\n"
+        "KURALLAR:\n"
         "- Fatura no, vergi no, GUID gibi alakasız numaraları alma\n"
-        "- Aynı numara birden fazla geçiyorsa bir kez yaz\n\n"
+        "- Aynı numara birden fazla geçiyorsa bir kez yaz\n"
+        "- Hiç bulunamazsa boş liste döndür\n\n"
 
-        "YANIT FORMATI — sadece bu JSON, başka hiçbir şey:\n"
-        '{"konsimento_list":["SPE041901781"],'
-        '"konteyner_list":["ARKU2438358"],'
-        '"beyanname_list":["26410500IM00045784"]}\n\n'
-        f"--- METİN BAŞLANGIÇ ---\n{metin}\n--- METİN BİTİŞ ---"
+        "SADECE JSON döndür, başka hiçbir şey yazma:\n"
+        '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
+        f"--- FATURA İÇERİĞİ ---\n{metin[:12000]}\n--- BİTİŞ ---"
     )
 
     try:
-        response = requests.post(
-            GEMINI_URL,
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0, "maxOutputTokens": 500}
-            },
-            timeout=30
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
         )
-
-        if response.status_code != 200:
-            log.error(f"Gemini HTTP {response.status_code}: {response.text[:200]}")
-            return None
-
-        data = response.json()
-        raw = data["candidates"][0]["content"]["parts"][0]["text"]
+        raw = message.content[0].text
         temiz = re.sub(r"```json|```", "", raw).strip()
         sonuc = json.loads(temiz)
-
         sonuc.setdefault("konsimento_list", [])
         sonuc.setdefault("konteyner_list", [])
         sonuc.setdefault("beyanname_list", [])
         return sonuc
 
     except Exception as e:
-        log.error(f"Gemini hatası: {e}")
+        log.error(f"Claude hatası: {e}")
         return None
 
 
