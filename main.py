@@ -143,7 +143,7 @@ def gmail_okunmamis_mailler(servis):
 
     try:
         result = servis.users().messages().list(
-            userId="me", q=query, maxResults=30
+            userId="me", q=query, maxResults=50
         ).execute()
     except HttpError as e:
         log.error(f"Gmail liste hatası: {e}")
@@ -257,6 +257,55 @@ def sayfayi_playwright_ile_oku(url):
     except Exception as e:
         log.error(f"Playwright hatası: {e}")
         return None
+
+
+def firma_adi_cek(html_govde):
+    """Mail gövdesindeki 'Gönderen' firmasını çeker."""
+    try:
+        # "Gönderen:" etiketinin yanındaki hücreyi bul
+        pattern = r'G[öo]nderen[^<]*<\/td>\s*<td[^>]*>\s*([^<\n]{3,80})'
+        match = re.search(pattern, html_govde, re.IGNORECASE)
+        if match:
+            firma = match.group(1).strip()
+            # HTML entity temizle
+            firma = firma.replace("&amp;", "&").replace("&nbsp;", " ").strip()
+            if len(firma) > 3:
+                return firma
+    except Exception:
+        pass
+    return ""
+
+
+def bize_ait_mi_kontrol(icerik, html_govde):
+    """
+    Faturanın bize ait olup olmadığını kontrol eder.
+
+    Mantık:
+    - DLK geçiyorsa: kesinlikle bizim, işleme devam
+    - Solmaz veya Subaşı geçiyorsa: kesinlikle bizim değil
+    - DENİZ İHRACAT NAVLUNU geçiyorsa: bizim değil
+    - Hiçbiri geçmiyorsa: belirsiz, işleme devam (bekleyene düşer)
+
+    Döndürür: (bize_ait: bool, sebep: str)
+    """
+    metin = (icerik or "").upper() + " " + (html_govde or "").upper()
+
+    # DLK geçiyorsa kesinlikle bizim — diğer kontrollere gerek yok
+    if "DLK" in metin:
+        return True, ""
+
+    # Deniz ihracat navlunu → bizim değil
+    if "DENIZ IHRACAT NAVLUNU" in metin or "DENIZ IHRACAT" in metin:
+        return False, "Deniz ihracat navlunu"
+
+    # Rakip gümrükçü firmaları → kesinlikle bizim değil
+    if "SOLMAZ" in metin:
+        return False, "Solmaz Gümrük Müşavirliği faturası"
+    if "SUBASI" in metin or "SUBASI" in metin:
+        return False, "Subaşı Gümrük Müşavirliği faturası"
+
+    # Hiçbiri geçmiyorsa → belirsiz, normal işleme devam et
+    return True, ""
 
 
 def linkten_url_bul(html_govde):
@@ -642,9 +691,10 @@ def main():
 
         log.info(f"Yeni mail işleniyor: {konu} | {gonderen}")
 
-        # Mail gövdesinden linki bul
-        govde = gmail_govde_al(mail["payload"])
-        url   = linkten_url_bul(govde)
+        # Mail gövdesinden linki ve firma adını çek
+        govde     = gmail_govde_al(mail["payload"])
+        url       = linkten_url_bul(govde)
+        firma_adi = firma_adi_cek(govde)
 
         if not url:
             log.info(f"Link bulunamadı: {konu}")
@@ -657,9 +707,21 @@ def main():
         if not icerik:
             log.error(f"Sayfa okunamadı: {url[:80]}")
             sheets_okunamayanEkle(gonderen, konu, tarih, "Sayfa açılamadı", fatura_url=url)
-            sheets_faturaListesiYaz(gonderen, tarih, None, "❌ Okunamadı", fatura_url=url)
+            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, None, "❌ Okunamadı", fatura_url=url)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
+            continue
+
+        # Bize ait mi kontrol et
+        bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, govde)
+        if not bize_ait:
+            log.info(f"Bize ait değil ({sahip_olmama_sebebi}): {konu}")
+            sheets_faturaListesiYaz(
+                firma_adi or gonderen, tarih, None,
+                "🔴 Bize Ait Değil | " + sahip_olmama_sebebi,
+                fatura_url=url
+            )
+            gmail_okundu_isaretle(gmail, email_id)
             continue
 
         # Gemini ile numaraları çıkar
@@ -676,7 +738,7 @@ def main():
                 "Konşimento/Konteyner/Beyanname bulunamadı",
                 fatura_url=url
             )
-            sheets_faturaListesiYaz(gonderen, tarih, numaralar, "❌ Okunamadı", fatura_url=url)
+            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "❌ Okunamadı", fatura_url=url)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
             continue
@@ -707,12 +769,12 @@ def main():
                 html
             )
             db_islendi_ekle(conn, email_id, dosyalar_str)
-            sheets_faturaListesiYaz(gonderen, tarih, numaralar, "✅ Eşleşti",
+            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
                                     dosya_no=dosyalar_str, fatura_url=url)
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
-            sheets_faturaListesiYaz(gonderen, tarih, numaralar, "🟡 Bekliyor", fatura_url=url)
+            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "🟡 Bekliyor", fatura_url=url)
             beklemeye += 1
 
         gmail_okundu_isaretle(gmail, email_id)
