@@ -306,6 +306,10 @@ def bize_ait_mi_kontrol(icerik, html_govde):
     if "DENIZ IHRACAT NAVLUNU" in metin or "DENIZ IHRACAT" in metin:
         return False, "Deniz ihracat navlunu"
 
+    # Konteyner VGM Hizmeti → bizim değil
+    if "KONTEYNER VGM" in metin or "VGM HIZMET" in metin:
+        return False, "Konteyner VGM Hizmeti"
+
     # Rakip gümrükçü firmaları → kesinlikle bizim değil
     if "SOLMAZ" in metin:
         return False, "Solmaz Gümrük Müşavirliği faturası"
