@@ -259,18 +259,26 @@ def sayfayi_playwright_ile_oku(url):
         return None
 
 
-def firma_adi_cek(html_govde):
-    """Mail gövdesindeki 'Gönderen' firmasını çeker."""
+def firma_adi_cek(icerik):
+    """
+    Fatura sayfasının düz metninden gönderici firma adını çeker.
+    Sayfa metninde "Gönderen" kelimesinin hemen ardından gelen
+    büyük harfli şirket adını alır.
+    Örnek: "Gönderen YILPORT KONTEYNER TERMİNALİ..."
+    """
+    if not icerik:
+        return ""
     try:
-        # "Gönderen:" etiketinin yanındaki hücreyi bul
-        pattern = r'G[öo]nderen[^<]*<\/td>\s*<td[^>]*>\s*([^<\n]{3,80})'
-        match = re.search(pattern, html_govde, re.IGNORECASE)
+        # Düz metin içinde "Gönderen" kelimesini bul
+        pattern = r'G[\xf6o]nderen[^\n]{0,5}([A-Z][A-Z\s\.&,]{5,79})'
+        match = re.search(pattern, icerik, re.IGNORECASE)
         if match:
             firma = match.group(1).strip()
-            # HTML entity temizle
-            firma = firma.replace("&amp;", "&").replace("&nbsp;", " ").strip()
-            if len(firma) > 3:
-                return firma
+            # Vergi no, GUID gibi sayısal şeyleri ele
+            # Eğer sadece rakam ve tire ise firma adı değildir
+            if re.match(r'^[\d\-]+$', firma):
+                return ""
+            return firma[:80].strip()
     except Exception:
         pass
     return ""
@@ -488,11 +496,28 @@ def sheets_okunamayanEkle(gonderen, konu, tarih, sebep, fatura_url=None):
         log.error(f"Sheets okunamayan yazma hatası: {e}")
 
 
+def sheets_fatura_islendi_mi(servis, email_id):
+    """Fatura Listesi'nde bu email_id daha önce yazılmış mı kontrol et."""
+    try:
+        result = servis.spreadsheets().values().get(
+            spreadsheetId=SHEETS_ID,
+            range="📑 Fatura Listesi!K:K"
+        ).execute()
+        rows = result.get("values", [])
+        for row in rows:
+            if row and str(row[0]).strip() == str(email_id).strip():
+                return True
+    except HttpError:
+        pass
+    return False
+
+
 def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
-                             dosya_no="", fatura_url=""):
+                             dosya_no="", fatura_url="", email_id=""):
     """
     Tüm faturaları tek bir listede tutar.
-    Durum: "✅ Eşleşti" | "🟡 Bekliyor" | "❌ Okunamadı"
+    Email ID kontrolü ile mükerrer kayıt engellenir.
+    Durum: "✅ Eşleşti" | "🟡 Bekliyor" | "❌ Okunamadı" | "🔴 Bize Ait Değil"
     """
     token_data = json.loads(GMAIL_TOKEN_JSON)
     creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
@@ -502,6 +527,11 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
     servis = build("sheets", "v4", credentials=creds)
     simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+    # Mükerrer kontrol
+    if email_id and sheets_fatura_islendi_mi(servis, email_id):
+        log.info(f"Fatura listesinde zaten var, atlanıyor: {email_id}")
+        return
+
     # Numaraları düz metin olarak yaz
     konsimento = ", ".join(numaralar.get("konsimento_list", [])) if numaralar else ""
     konteyner  = ", ".join(numaralar.get("konteyner_list",  [])) if numaralar else ""
@@ -510,19 +540,20 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
     try:
         servis.spreadsheets().values().append(
             spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!A:J",
+            range="📑 Fatura Listesi!A:K",
             valueInputOption="RAW",
             body={"values": [[
                 simdi,       # A: Geliş Tarihi
                 tarih,       # B: Mail Tarihi
-                gonderen,    # C: Gönderen
+                gonderen,    # C: Gönderen Firma
                 konsimento,  # D: Konşimento
                 konteyner,   # E: Konteyner
                 beyanname,   # F: Beyanname
                 durum,       # G: Durum
                 dosya_no,    # H: Dosya No
                 fatura_url,  # I: Fatura Linki
-                "",          # J: İşlemi Yapan (manuel girişte dolar)
+                "",          # J: İşlemi Yapan
+                email_id,    # K: Email ID (mükerrer kontrol için)
             ]]}
         ).execute()
     except HttpError as e:
@@ -691,10 +722,9 @@ def main():
 
         log.info(f"Yeni mail işleniyor: {konu} | {gonderen}")
 
-        # Mail gövdesinden linki ve firma adını çek
-        govde     = gmail_govde_al(mail["payload"])
-        url       = linkten_url_bul(govde)
-        firma_adi = firma_adi_cek(govde)
+        # Mail gövdesinden linki çek
+        govde = gmail_govde_al(mail["payload"])
+        url   = linkten_url_bul(govde)
 
         if not url:
             log.info(f"Link bulunamadı: {konu}")
@@ -707,10 +737,13 @@ def main():
         if not icerik:
             log.error(f"Sayfa okunamadı: {url[:80]}")
             sheets_okunamayanEkle(gonderen, konu, tarih, "Sayfa açılamadı", fatura_url=url)
-            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, None, "❌ Okunamadı", fatura_url=url)
+            sheets_faturaListesiYaz(gonderen, tarih, None, "❌ Okunamadı", fatura_url=url, email_id=email_id)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
             continue
+
+        # Firma adını fatura sayfasından çek
+        firma_adi = firma_adi_cek(icerik)
 
         # Bize ait mi kontrol et
         bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, govde)
@@ -719,7 +752,7 @@ def main():
             sheets_faturaListesiYaz(
                 firma_adi or gonderen, tarih, None,
                 "🔴 Bize Ait Değil | " + sahip_olmama_sebebi,
-                fatura_url=url
+                fatura_url=url, email_id=email_id
             )
             gmail_okundu_isaretle(gmail, email_id)
             continue
@@ -738,7 +771,7 @@ def main():
                 "Konşimento/Konteyner/Beyanname bulunamadı",
                 fatura_url=url
             )
-            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "❌ Okunamadı", fatura_url=url)
+            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "❌ Okunamadı", fatura_url=url, email_id=email_id)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
             continue
@@ -770,11 +803,11 @@ def main():
             )
             db_islendi_ekle(conn, email_id, dosyalar_str)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
-                                    dosya_no=dosyalar_str, fatura_url=url)
+                                    dosya_no=dosyalar_str, fatura_url=url, email_id=email_id)
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
-            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "🟡 Bekliyor", fatura_url=url)
+            sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "🟡 Bekliyor", fatura_url=url, email_id=email_id)
             beklemeye += 1
 
         gmail_okundu_isaretle(gmail, email_id)
