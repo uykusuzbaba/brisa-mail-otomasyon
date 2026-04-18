@@ -13,7 +13,6 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import anthropic
 import requests
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -34,7 +33,6 @@ GOOGLE_API_KEY       = os.environ["GOOGLE_API_KEY"]
 GMAIL_TOKEN_JSON     = os.environ["GMAIL_TOKEN_JSON"]       # token.json içeriği
 SHEETS_ID            = os.environ["SHEETS_ID"]
 BILDIRIM_ALICISI     = os.environ["BILDIRIM_ALICISI"]
-ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 GONDEREN_LISTESI     = os.environ.get("GONDEREN_LISTESI", "m.hizmet@brisa.com.tr").split(",")
 SORGU_PENCERESI_GUN  = int(os.environ.get("SORGU_PENCERESI_GUN", "60"))
 
@@ -367,10 +365,10 @@ def regex_ile_numaralari_cek(metin):
 
     # ── Konşimento: etiket yanındaki alfanümerik kod ──────────
     konsimentolar = []
-    kon_etiket = r'(?:Kon[şs]imento|B/?L|Bill of Lading|BL No)[^A-Z0-9]{0,10}([A-Z0-9]{6,20})'
+    kon_etiket = r'(?:KON[Şs]IMENTO|B/?L|BILL OF LADING|BL NO)[^A-Z0-9]{0,15}([A-Z0-9]{6,25})'
     for m in re.finditer(kon_etiket, metin_upper):
         kod = m.group(1).strip()
-        if kod and not kod.startswith('YLP') and not kod.startswith('TR1'):
+        if kod and not kod.startswith('YLP') and not kod.startswith('TR1') and not kod.startswith('TK'):
             konsimentolar.append(kod)
     konsimentolar = list(set(konsimentolar))
 
@@ -386,38 +384,51 @@ def regex_ile_numaralari_cek(metin):
 
 def claude_ile_numaralari_cek(metin):
     """
-    Claude Haiku ile numara çıkarımı.
+    Gemini ile numara çıkarımı.
     Sadece regex başarısız olduğunda çağrılır.
     """
     prompt = (
         "Aşağıdaki metin bir Türk lojistik/gümrük e-faturasına ait sayfa içeriğidir.\n"
-        "Bu metinden 3 tür numara çıkar. Numaralar 'Not' satırlarında yazıyor olabilir.\n\n"
+        "Bu metinden 3 tür numara çıkar. Numaralar Not satırlarında yazıyor olabilir.\n\n"
 
-        "1. KONŞİMENTO NUMARASI (Konşimento, B/L, Bill of Lading etiketleri)\n"
-        "   Örnek: SPE041901781, MEDUFB089573\n\n"
+        "1. KONŞİMENTO NUMARASI\n"
+        "   Etiketler: Konsimento, Konsimento No, B/L, BL, Bill of Lading\n"
+        "   Not satirlarinda da olabilir: Not 11: Konsimento :MEDUFB089573\n"
+        "   Ornek: SPE041901781, MEDUFB089573, HLCUIST2501XXXXX\n\n"
 
-        "2. KONTEYNER NUMARASI — ISO 6346 standardı\n"
-        "   Format: Tam olarak 4 büyük harf + 7 rakam\n"
-        "   Örnek: ARKU2438358, MSMU7499454\n\n"
+        "2. KONTEYNER NUMARASI — ISO 6346\n"
+        "   Format: 4 buyuk harf + 7 rakam\n"
+        "   Virgülle ayrilmis birden fazla olabilir\n"
+        "   Ornek: ARKU2438358, MSMU7499454\n\n"
 
-        "3. BEYANNAME NUMARASI — Türk Gümrük formatı\n"
-        "   Format: 5 rakam + 2 harf (IM/AN/EX..) + 8 rakam\n"
-        "   Örnek: 26410500IM00045784\n\n"
+        "3. BEYANNAME NUMARASI — Turk Gümrük\n"
+        "   Format: 5 rakam + 2 harf (IM/AN/EX/IH) + 8 rakam\n"
+        "   Not satirlarinda: Not 3: Beyanname No: 26410500IM00045602\n"
+        "   Ornek: 26410500IM00045784\n\n"
 
-        "- Fatura no (YLP...), ETTN, GUID, vergi no alma\n"
-        "- SADECE JSON döndür:\n"
+        "KURALLAR:\n"
+        "- Fatura no (YLP...), ETTN, GUID, vergi no ALMA\n"
+        "- Not satirlarina ozellikle dikkat et\n"
+        "- SADECE JSON dondur:\n"
         '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
-        f"--- FATURA ---\n{metin[:10000]}\n--- BİTİŞ ---"
+        f"--- FATURA ---\n{metin[:12000]}\n--- BITIS ---"
     )
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}]
+        response = requests.post(
+            GEMINI_URL,
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0, "maxOutputTokens": 500}
+            },
+            timeout=30
         )
-        raw = message.content[0].text
+        if response.status_code != 200:
+            log.error(f"Gemini HTTP {response.status_code}")
+            return None
+
+        data = response.json()
+        raw = data["candidates"][0]["content"]["parts"][0]["text"]
         temiz = re.sub(r"```json|```", "", raw).strip()
         sonuc = json.loads(temiz)
         sonuc.setdefault("konsimento_list", [])
@@ -432,7 +443,7 @@ def claude_ile_numaralari_cek(metin):
         return None if hic_yok else sonuc
 
     except Exception as e:
-        log.error(f"Claude hatası: {e}")
+        log.error(f"Gemini hatası: {e}")
         return None
 
 
