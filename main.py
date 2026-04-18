@@ -439,6 +439,47 @@ def sheets_okunamayanEkle(gonderen, konu, tarih, sebep, fatura_url=None):
         log.error(f"Sheets okunamayan yazma hatası: {e}")
 
 
+def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
+                             dosya_no="", fatura_url=""):
+    """
+    Tüm faturaları tek bir listede tutar.
+    Durum: "✅ Eşleşti" | "🟡 Bekliyor" | "❌ Okunamadı"
+    """
+    token_data = json.loads(GMAIL_TOKEN_JSON)
+    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+
+    servis = build("sheets", "v4", credentials=creds)
+    simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Numaraları düz metin olarak yaz
+    konsimento = ", ".join(numaralar.get("konsimento_list", [])) if numaralar else ""
+    konteyner  = ", ".join(numaralar.get("konteyner_list",  [])) if numaralar else ""
+    beyanname  = ", ".join(numaralar.get("beyanname_list",  [])) if numaralar else ""
+
+    try:
+        servis.spreadsheets().values().append(
+            spreadsheetId=SHEETS_ID,
+            range="📑 Fatura Listesi!A:J",
+            valueInputOption="RAW",
+            body={"values": [[
+                simdi,       # A: Geliş Tarihi
+                tarih,       # B: Mail Tarihi
+                gonderen,    # C: Gönderen
+                konsimento,  # D: Konşimento
+                konteyner,   # E: Konteyner
+                beyanname,   # F: Beyanname
+                durum,       # G: Durum
+                dosya_no,    # H: Dosya No
+                fatura_url,  # I: Fatura Linki
+                "",          # J: İşlemi Yapan (manuel girişte dolar)
+            ]]}
+        ).execute()
+    except HttpError as e:
+        log.error(f"Fatura listesi yazma hatası: {e}")
+
+
 # ════════════════════════════════════════════════════════════
 #  EŞLEŞTİRME
 # ════════════════════════════════════════════════════════════
@@ -616,6 +657,7 @@ def main():
         if not icerik:
             log.error(f"Sayfa okunamadı: {url[:80]}")
             sheets_okunamayanEkle(gonderen, konu, tarih, "Sayfa açılamadı", fatura_url=url)
+            sheets_faturaListesiYaz(gonderen, tarih, None, "❌ Okunamadı", fatura_url=url)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
             continue
@@ -634,6 +676,7 @@ def main():
                 "Konşimento/Konteyner/Beyanname bulunamadı",
                 fatura_url=url
             )
+            sheets_faturaListesiYaz(gonderen, tarih, numaralar, "❌ Okunamadı", fatura_url=url)
             gmail_okundu_isaretle(gmail, email_id)
             okunamadi += 1
             continue
@@ -664,9 +707,12 @@ def main():
                 html
             )
             db_islendi_ekle(conn, email_id, dosyalar_str)
+            sheets_faturaListesiYaz(gonderen, tarih, numaralar, "✅ Eşleşti",
+                                    dosya_no=dosyalar_str, fatura_url=url)
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
+            sheets_faturaListesiYaz(gonderen, tarih, numaralar, "🟡 Bekliyor", fatura_url=url)
             beklemeye += 1
 
         gmail_okundu_isaretle(gmail, email_id)
