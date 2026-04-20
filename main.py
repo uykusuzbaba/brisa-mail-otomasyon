@@ -227,11 +227,10 @@ def gmail_mail_gonder(servis, konu, html_govde):
 
 def sayfayi_playwright_ile_oku(url):
     """
-    Playwright ile sayfayı tam render et, düz metni döndür.
-    JS çalıştıktan sonraki içeriği okur.
+    Playwright ile sayfayı tam render eder. 
+    Senin orijinal kodundaki 15.000 karakter sınırını ve bekleme süresini korur.
     """
     log.info(f"Playwright ile sayfa açılıyor: {url[:80]}...")
-
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -240,10 +239,10 @@ def sayfayi_playwright_ile_oku(url):
             )
             page = browser.new_page()
 
-            # Sayfayı aç, JS yüklenene kadar bekle
+            # Sayfayı aç, ağın sakinleşmesini bekle (30 saniye limit)
             page.goto(url, wait_until="networkidle", timeout=30000)
 
-            # Ek bekleme — dinamik içerik için
+            # KRİTİK: Senin orijinal kodundaki 2 saniyelik bekleme
             page.wait_for_timeout(2000)
 
             # Tam sayfa metnini al
@@ -251,12 +250,12 @@ def sayfayi_playwright_ile_oku(url):
             browser.close()
 
             log.info(f"Sayfa okundu: {len(icerik)} karakter")
+            # Senin orijinal 15.000 karakter limitini burada tutuyoruz
             return icerik[:15000]
 
     except Exception as e:
         log.error(f"Playwright hatası: {e}")
         return None
-
 
 def firma_adi_cek(icerik):
     """
@@ -387,16 +386,18 @@ def regex_ile_numaralari_cek(metin):
 
 def gemini_ile_numaralari_cek(metin):
     """
-    Claude limitine takılmadan, Gemini 2.0 Flash ile numara çıkarımı yapar.
+    Claude yerine Gemini 2.0 Flash kullanarak numara çıkarımı yapar.
+    Senin orijinal prompt ve JSON formatını birebir korur.
     """
     prompt = (
-        "Aşağıdaki gümrük faturası metninden 3 tür numara çıkar:\n"
-        "1. KONŞİMENTO: (Örn: SPE041901781, MEDUFB089573)\n"
-        "2. KONTEYNER: (Örn: ARKU2438358, MSMU7499454)\n"
-        "3. BEYANNAME: (Örn: 26410500IM00045602)\n\n"
+        "Aşağıdaki metin bir Türk lojistik/gümrük e-faturasına ait sayfa içeriğidir.\n"
+        "Bu metinden 3 tür numara çıkar. Numaralar Not satırlarında yazıyor olabilir.\n\n"
+        "1. KONŞİMENTO NUMARASI\n"
+        "2. KONTEYNER NUMARASI — ISO 6346\n"
+        "3. BEYANNAME NUMARASI — Turk Gümrük\n\n"
         "SADECE JSON dondur:\n"
         '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
-        f"--- FATURA ---\n{metin[:12000]}"
+        f"--- FATURA ---\n{metin[:12000]}\n--- BITIS ---"
     )
 
     try:
@@ -413,24 +414,33 @@ def gemini_ile_numaralari_cek(metin):
 
         data = response.json()
         raw = data["candidates"][0]["content"]["parts"][0]["text"]
-        # JSON dışındaki fazlalıkları temizler
-        temiz = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(temiz)
+        # JSON temizleme
+        temiz = re.sub(r"```json|```", "", raw).strip()
+        sonuc = json.loads(temiz)
+        
+        # Orijinal kodundaki gibi eksik anahtarları tamamla
+        sonuc.setdefault("konsimento_list", [])
+        sonuc.setdefault("konteyner_list", [])
+        sonuc.setdefault("beyanname_list", [])
+
+        hic_yok = not any([sonuc["konsimento_list"], sonuc["konteyner_list"], sonuc["beyanname_list"]])
+        return None if hic_yok else sonuc
     except Exception as e:
         log.error(f"Gemini hatası: {e}")
         return None
 
 def gemini_numaralari_kadir(metin):
     """
-    Hibrit motor: Önce hızlı Regex, bulamazsa Gemini.
+    Senin orijinal hibrit motorun: Önce Regex, bulamazsa Gemini.
     """
-    # Önce kodundaki mevcut regex fonksiyonunu dener
+    # 1. Adım: Senin Regex fonksiyonunu dener
     sonuc = regex_ile_numaralari_cek(metin)
     if sonuc:
+        log.info(f"Regex ile bulundu → K:{len(sonuc['konsimento_list'])} | C:{len(sonuc['konteyner_list'])} | B:{len(sonuc['beyanname_list'])}")
         return sonuc
 
-    # Regex bulamazsa Gemini'ye sorar
-    log.info("Regex sonuç vermedi, Gemini devreye giriyor...")
+    # 2. Adım: Regex bulamazsa Gemini'ye sorar
+    log.info("Regex bulamadı, Gemini'ye gönderiliyor...")
     return gemini_ile_numaralari_cek(metin)
 
 
