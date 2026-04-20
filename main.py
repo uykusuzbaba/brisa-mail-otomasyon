@@ -472,11 +472,10 @@ def claude_ile_numaralari_cek(metin):
 
 def gemini_numaralari_kadir(metin):
     """
-    Hibrit numara çıkarım motoru:
-    1. Önce regex ile standart formatlarda ara (hızlı, ücretsiz)
-    2. Bulamazsa Claude Haiku'ya gönder (yavaş, ücretli ama güvenilir)
+    Sadece regex ile numara çıkarımı.
+    Gemini devre dışı — test için.
     """
-    # Adım 1: Regex
+    # Sadece Regex
     sonuc = regex_ile_numaralari_cek(metin)
     if sonuc:
         log.info(f"Regex ile bulundu → "
@@ -484,10 +483,10 @@ def gemini_numaralari_kadir(metin):
                  f"| Konteyner: {len(sonuc['konteyner_list'])} "
                  f"| Beyanname: {len(sonuc['beyanname_list'])}")
         return sonuc
-
-    # Adım 2: Claude
-    log.info("Regex bulamadı, Claude'a gönderiliyor...")
-    return claude_ile_numaralari_cek(metin)
+    
+    # Gemini devre dışı — bulamazsa None döner
+    log.info("Regex bulamadı — Gemini devre dışı")
+    return None
 
 
 # ════════════════════════════════════════════════════════════
