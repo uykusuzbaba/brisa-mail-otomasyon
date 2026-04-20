@@ -411,7 +411,12 @@ def regex_ile_numaralari_cek(metin):
     for m in re.finditer(awb_10, metin_upper):
         awb_list.append(m.group(1))
     
-    # 2. Tire ile airline kodu: 235-87235831
+    # 2. AWB/HİZMET yanında: 10 rakam
+    awb_hizmet = r'AWB[/\s]*H[İI]ZMET[:\s]*(\d{10})\b'
+    for m in re.finditer(awb_hizmet, metin_upper):
+        awb_list.append(m.group(1))
+    
+    # 3. Tire ile airline kodu: 235-87235831
     awb_tire = r'AWB\s*NO[:\s]*(\d{3}-\d{8})\b'
     for m in re.finditer(awb_tire, metin_upper):
         awb_list.append(m.group(1))
@@ -719,6 +724,8 @@ def eslestir(numaralar, referans):
     Faturadan çıkarılan numaraları Sheets referans listesiyle karşılaştırır.
     TÜM eşleşmeleri döndürür — aynı konşimento/konteyner için birden fazla
     dosya (beyanname) olabilir, hepsi tek mailde gösterilir.
+    
+    Beyanname için esnek eşleştirme: Son 6 rakam eşleşirse kabul edilir.
     """
     f_konsimentolar = [_norm(v) for v in numaralar.get("konsimento_list", []) if v]
     f_konteynerlar  = [_norm(v) for v in numaralar.get("konteyner_list",  []) if v]
@@ -752,11 +759,27 @@ def eslestir(numaralar, referans):
         if dosya in gorulmus_dosyalar:
             continue
 
-        # Beyanname eşleşmesi
+        # Beyanname eşleşmesi (esnek: son 6 rakam)
         for r_bey in row.get("beyanname_listesi", []):
-            if r_bey and r_bey in f_beyannameler:
-                eslesmeler.append({"dosya_no": dosya, "kriter": "Beyanname No", "deger": r_bey})
-                gorulmus_dosyalar.add(dosya)
+            if not r_bey:
+                continue
+            
+            # Referans beyannameden son 6 rakamı al
+            r_bey_rakamlar = ''.join(c for c in r_bey if c.isdigit())
+            r_son6 = r_bey_rakamlar[-6:] if len(r_bey_rakamlar) >= 6 else r_bey_rakamlar
+            
+            # Faturadaki her beyanname ile karşılaştır
+            for f_bey in f_beyannameler:
+                f_bey_rakamlar = ''.join(c for c in f_bey if c.isdigit())
+                f_son6 = f_bey_rakamlar[-6:] if len(f_bey_rakamlar) >= 6 else f_bey_rakamlar
+                
+                # Son 6 rakam eşleşirse veya tam eşleşme varsa
+                if (r_son6 and f_son6 and r_son6 == f_son6) or r_bey == f_bey:
+                    eslesmeler.append({"dosya_no": dosya, "kriter": "Beyanname No", "deger": f"{f_bey} ≈ {r_bey}"})
+                    gorulmus_dosyalar.add(dosya)
+                    break
+            
+            if dosya in gorulmus_dosyalar:
                 break
 
     return eslesmeler if eslesmeler else None
