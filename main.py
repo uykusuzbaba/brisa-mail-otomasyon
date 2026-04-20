@@ -358,21 +358,66 @@ def regex_ile_numaralari_cek(metin):
     # Fatura no gibi YLP... ile başlayanları ele
     konteynerler = [k for k in konteynerler if not k.startswith('YLP')]
 
-    # ── Beyanname (Türk Gümrük): rakam+IM/AN/EX/IH+rakam ────
+    # ── Beyanname (Türk Gümrük) ────────────────────────────
+    beyannameler = []
+    
+    # 1. Standart: 5 rakam + IM/AN/EX + 8 rakam
     beyanname_pattern = r'\b(\d{5}[A-Z]{2}\d{8})\b'
-    beyannameler = list(set(re.findall(beyanname_pattern, metin_upper)))
-    # Sadece bilinen Türk gümrük tip kodlarını al
-    tip_kodlari = ['IM', 'AN', 'EX', 'IH', 'TR', 'TI', 'AB', 'AT']
-    beyannameler = [b for b in beyannameler
-                    if any(b[5:7] == tip for tip in tip_kodlari)]
+    beyler = re.findall(beyanname_pattern, metin_upper)
+    tip_kodlari = ['IM', 'AN', 'EX', 'IH', 'TR', 'TI', 'AB', 'AT', 'EI']
+    beyannameler.extend([b for b in beyler if any(b[5:7] == tip for tip in tip_kodlari)])
+    
+    # 2. Slash formatı: 26/IM0226949
+    slash_pattern = r'\b(\d{2}/[A-Z]{2}\d{7,8})\b'
+    slash_beyler = re.findall(slash_pattern, metin_upper)
+    beyannameler.extend([b for b in slash_beyler if any(f'/{tip}' in b for tip in tip_kodlari)])
+    
+    # 3. Kısa format (Bey.No yanında): 6 rakam
+    bey_kisa = r'BEY\.?\s*NO[:\s]*(\d{6})\b'
+    for m in re.finditer(bey_kisa, metin_upper):
+        beyannameler.append(m.group(1))
+    
+    beyannameler = list(set(beyannameler))
 
-    # ── Konşimento: etiket yanındaki alfanümerik kod ──────────
+    # ── Konşimento ───────────────────────────────────────────
     konsimentolar = []
-    kon_etiket = r'(?:KON[Şs]IMENTO|B/?L|BILL OF LADING|BL NO)[^A-Z0-9]{0,15}([A-Z0-9]{6,25})'
+    
+    # 1. Etiket yanındaki alfanümerik kod
+    kon_etiket = r'(?:KON[Şs]IMENTO|B/?L|BILL OF LADING|BL NO)[^A-Z0-9]{0,15}([A-Z0-9\-]{6,25})'
     for m in re.finditer(kon_etiket, metin_upper):
         kod = m.group(1).strip()
         if kod and not kod.startswith('YLP') and not kod.startswith('TR1') and not kod.startswith('TK'):
             konsimentolar.append(kod)
+    
+    # 2. Tire ile ayrılmış: 205-75999114, 61598712294-11
+    kon_tire = r'\b(\d{3,11}-\d{5,11})\b'
+    tire_konlar = re.findall(kon_tire, metin_upper)
+    konsimentolar.extend(tire_konlar)
+    
+    # 3. Harfli formatlar: MEDUKC378982, 26HU121000
+    kon_harfli = r'\b([A-Z]{3,6}\d{6,10})\b'
+    harfli = re.findall(kon_harfli, metin_upper)
+    # Sadece MEDU, SPE, HLCU gibi bilinen prefix'ler
+    bilinen_prefix = ['MEDU', 'SPE', 'HLCU', 'MSK', 'ONE', 'CMA']
+    konsimentolar.extend([h for h in harfli if any(h.startswith(p) for p in bilinen_prefix)])
+    
+    konsimentolar = list(set(konsimentolar))
+    
+    # ── AWB (Hava Konşimentosu) ──────────────────────────────
+    awb_list = []
+    
+    # 1. AWB No yanında: 10 rakam
+    awb_10 = r'AWB\s*NO[:\s]*(\d{10})\b'
+    for m in re.finditer(awb_10, metin_upper):
+        awb_list.append(m.group(1))
+    
+    # 2. Tire ile airline kodu: 235-87235831
+    awb_tire = r'AWB\s*NO[:\s]*(\d{3}-\d{8})\b'
+    for m in re.finditer(awb_tire, metin_upper):
+        awb_list.append(m.group(1))
+    
+    # AWB'leri konşimento listesine ekle (aynı kategoride)
+    konsimentolar.extend(awb_list)
     konsimentolar = list(set(konsimentolar))
 
     sonuc = {
