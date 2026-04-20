@@ -310,9 +310,12 @@ def bize_ait_mi_kontrol(icerik, html_govde):
         return False, "Konteyner VGM Hizmeti"
 
     # Rakip gümrükçü firmaları → kesinlikle bizim değil
-    if "SOLMAZ" in metin:
+    # Ama önce Brisa'nın kendi email adresini (ithalat.brisa@subasi.net) hariç tut
+    metin_email_haric = metin.replace("ITHALAT.BRISA@SUBASI.NET", "").replace("@SUBASI.NET", "")
+    
+    if "SOLMAZ GUMRUK" in metin_email_haric or "SOLMAZ GÜMRÜK" in metin_email_haric:
         return False, "Solmaz Gümrük Müşavirliği faturası"
-    if "SUBASI" in metin or "SUBASI" in metin:
+    if "SUBASI GUMRUK" in metin_email_haric or "SUBAŞI GÜMRÜK" in metin_email_haric:
         return False, "Subaşı Gümrük Müşavirliği faturası"
 
     # Hiçbiri geçmiyorsa → belirsiz, normal işleme devam et
