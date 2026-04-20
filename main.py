@@ -227,10 +227,11 @@ def gmail_mail_gonder(servis, konu, html_govde):
 
 def sayfayi_playwright_ile_oku(url):
     """
-    Playwright ile sayfayı tam render eder. 
-    Senin orijinal kodundaki 15.000 karakter sınırını ve bekleme süresini korur.
+    Playwright ile sayfayı tam render et, düz metni döndür.
+    JS çalıştıktan sonraki içeriği okur.
     """
     log.info(f"Playwright ile sayfa açılıyor: {url[:80]}...")
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -239,10 +240,10 @@ def sayfayi_playwright_ile_oku(url):
             )
             page = browser.new_page()
 
-            # Sayfayı aç, ağın sakinleşmesini bekle (30 saniye limit)
+            # Sayfayı aç, JS yüklenene kadar bekle
             page.goto(url, wait_until="networkidle", timeout=30000)
 
-            # KRİTİK: Senin orijinal kodundaki 2 saniyelik bekleme
+            # Ek bekleme — dinamik içerik için
             page.wait_for_timeout(2000)
 
             # Tam sayfa metnini al
@@ -250,12 +251,12 @@ def sayfayi_playwright_ile_oku(url):
             browser.close()
 
             log.info(f"Sayfa okundu: {len(icerik)} karakter")
-            # Senin orijinal 15.000 karakter limitini burada tutuyoruz
             return icerik[:15000]
 
     except Exception as e:
         log.error(f"Playwright hatası: {e}")
         return None
+
 
 def firma_adi_cek(icerik):
     """
@@ -384,64 +385,109 @@ def regex_ile_numaralari_cek(metin):
     return None if hic_yok else sonuc
 
 
-def gemini_ile_numaralari_cek(metin):
+def claude_ile_numaralari_cek(metin):
     """
-    Claude yerine Gemini 2.0 Flash kullanarak numara çıkarımı yapar.
-    Senin orijinal prompt ve JSON formatını birebir korur.
+    Gemini ile numara çıkarımı.
+    Sadece regex başarısız olduğunda çağrılır.
+    Rate limit durumunda retry yapar.
     """
     prompt = (
         "Aşağıdaki metin bir Türk lojistik/gümrük e-faturasına ait sayfa içeriğidir.\n"
         "Bu metinden 3 tür numara çıkar. Numaralar Not satırlarında yazıyor olabilir.\n\n"
+
         "1. KONŞİMENTO NUMARASI\n"
+        "   Etiketler: Konsimento, Konsimento No, B/L, BL, Bill of Lading\n"
+        "   Not satirlarinda da olabilir: Not 11: Konsimento :MEDUFB089573\n"
+        "   Ornek: SPE041901781, MEDUFB089573, HLCUIST2501XXXXX\n\n"
+
         "2. KONTEYNER NUMARASI — ISO 6346\n"
-        "3. BEYANNAME NUMARASI — Turk Gümrük\n\n"
-        "SADECE JSON dondur:\n"
+        "   Format: 4 buyuk harf + 7 rakam\n"
+        "   Virgülle ayrilmis birden fazla olabilir\n"
+        "   Ornek: ARKU2438358, MSMU7499454\n\n"
+
+        "3. BEYANNAME NUMARASI — Turk Gümrük\n"
+        "   Format: 5 rakam + 2 harf (IM/AN/EX/IH) + 8 rakam\n"
+        "   Not satirlarinda: Not 3: Beyanname No: 26410500IM00045602\n"
+        "   Ornek: 26410500IM00045784\n\n"
+
+        "KURALLAR:\n"
+        "- Fatura no (YLP...), ETTN, GUID, vergi no ALMA\n"
+        "- Not satirlarina ozellikle dikkat et\n"
+        "- SADECE JSON dondur:\n"
         '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
         f"--- FATURA ---\n{metin[:12000]}\n--- BITIS ---"
     )
 
-    try:
-        response = requests.post(
-            GEMINI_URL,
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0}
-            },
-            timeout=30
-        )
-        if response.status_code != 200:
+    # 3 deneme yap, rate limit yiyince bekle
+    for deneme in range(3):
+        try:
+            response = requests.post(
+                GEMINI_URL,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0, "maxOutputTokens": 500}
+                },
+                timeout=30
+            )
+            
+            # Rate limit (429) — 15 saniye bekle, tekrar dene
+            if response.status_code == 429:
+                bekleme = 15 * (deneme + 1)  # 15s, 30s, 45s
+                log.warning(f"Gemini rate limit — {bekleme}s bekleniyor (deneme {deneme+1}/3)")
+                time.sleep(bekleme)
+                continue
+            
+            if response.status_code != 200:
+                log.error(f"Gemini HTTP {response.status_code}")
+                return None
+
+            data = response.json()
+            raw = data["candidates"][0]["content"]["parts"][0]["text"]
+            temiz = re.sub(r"```json|```", "", raw).strip()
+            sonuc = json.loads(temiz)
+            sonuc.setdefault("konsimento_list", [])
+            sonuc.setdefault("konteyner_list", [])
+            sonuc.setdefault("beyanname_list", [])
+
+            hic_yok = not any([
+                sonuc["konsimento_list"],
+                sonuc["konteyner_list"],
+                sonuc["beyanname_list"]
+            ])
+            
+            # Başarılı okuma arasında 5 saniye bekle (rate limit önleme)
+            time.sleep(5)
+            return None if hic_yok else sonuc
+
+        except Exception as e:
+            log.error(f"Gemini hatası (deneme {deneme+1}/3): {e}")
+            if deneme < 2:
+                time.sleep(10)
+                continue
             return None
+    
+    log.error("Gemini 3 denemede başarısız oldu")
+    return None
 
-        data = response.json()
-        raw = data["candidates"][0]["content"]["parts"][0]["text"]
-        # JSON temizleme
-        temiz = re.sub(r"```json|```", "", raw).strip()
-        sonuc = json.loads(temiz)
-        
-        # Orijinal kodundaki gibi eksik anahtarları tamamla
-        sonuc.setdefault("konsimento_list", [])
-        sonuc.setdefault("konteyner_list", [])
-        sonuc.setdefault("beyanname_list", [])
-
-        hic_yok = not any([sonuc["konsimento_list"], sonuc["konteyner_list"], sonuc["beyanname_list"]])
-        return None if hic_yok else sonuc
-    except Exception as e:
-        log.error(f"Gemini hatası: {e}")
-        return None
 
 def gemini_numaralari_kadir(metin):
     """
-    Senin orijinal hibrit motorun: Önce Regex, bulamazsa Gemini.
+    Hibrit numara çıkarım motoru:
+    1. Önce regex ile standart formatlarda ara (hızlı, ücretsiz)
+    2. Bulamazsa Claude Haiku'ya gönder (yavaş, ücretli ama güvenilir)
     """
-    # 1. Adım: Senin Regex fonksiyonunu dener
+    # Adım 1: Regex
     sonuc = regex_ile_numaralari_cek(metin)
     if sonuc:
-        log.info(f"Regex ile bulundu → K:{len(sonuc['konsimento_list'])} | C:{len(sonuc['konteyner_list'])} | B:{len(sonuc['beyanname_list'])}")
+        log.info(f"Regex ile bulundu → "
+                 f"Konşimento: {len(sonuc['konsimento_list'])} "
+                 f"| Konteyner: {len(sonuc['konteyner_list'])} "
+                 f"| Beyanname: {len(sonuc['beyanname_list'])}")
         return sonuc
 
-    # 2. Adım: Regex bulamazsa Gemini'ye sorar
-    log.info("Regex bulamadı, Gemini'ye gönderiliyor...")
-    return gemini_ile_numaralari_cek(metin)
+    # Adım 2: Claude
+    log.info("Regex bulamadı, Claude'a gönderiliyor...")
+    return claude_ile_numaralari_cek(metin)
 
 
 # ════════════════════════════════════════════════════════════
@@ -847,14 +893,14 @@ def main():
                     e["dosya_no"], e["kriter"], e["deger"]
                 )
 
-            # Tüm eşleşmeleri tek mailde gönder
+            # Mail gönderme devre dışı — panel üzerinden takip ediliyor
             dosyalar_str = ", ".join(e["dosya_no"] for e in eslesmeler)
-            html = bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=url)
-            gmail_mail_gonder(
-                gmail,
-                f"✅ Fatura Eşleşmesi — {len(eslesmeler)} Dosya: {dosyalar_str}",
-                html
-            )
+            # html = bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=url)
+            # gmail_mail_gonder(
+            #     gmail,
+            #     f"✅ Fatura Eşleşmesi — {len(eslesmeler)} Dosya: {dosyalar_str}",
+            #     html
+            # )
             db_islendi_ekle(conn, email_id, dosyalar_str)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
                                     dosya_no=dosyalar_str, fatura_url=url, email_id=email_id)
@@ -893,13 +939,14 @@ def main():
                 e["dosya_no"], e["kriter"], e["deger"]
             )
 
+        # Mail gönderme devre dışı — panel üzerinden takip ediliyor
         dosyalar_str_b = ", ".join(e["dosya_no"] for e in eslesmeler_b)
-        html = bildirim_html(item_gonderen, item_konu, item_tarih, eslesmeler_b)
-        gmail_mail_gonder(
-            gmail,
-            f"✅ Fatura Eşleşmesi — {len(eslesmeler_b)} Dosya: {dosyalar_str_b}",
-            html
-        )
+        # html = bildirim_html(item_gonderen, item_konu, item_tarih, eslesmeler_b)
+        # gmail_mail_gonder(
+        #     gmail,
+        #     f"✅ Fatura Eşleşmesi — {len(eslesmeler_b)} Dosya: {dosyalar_str_b}",
+        #     html
+        # )
         db_islendi_ekle(conn, item_email_id, dosyalar_str_b)
         db_bekleyeni_sil(conn, item_id)
         yeniden_eslesti += 1
