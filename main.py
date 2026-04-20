@@ -385,36 +385,18 @@ def regex_ile_numaralari_cek(metin):
     return None if hic_yok else sonuc
 
 
-def claude_ile_numaralari_cek(metin):
+def gemini_ile_numaralari_cek(metin):
     """
-    Gemini ile numara çıkarımı.
-    Sadece regex başarısız olduğunda çağrılır.
+    Claude limitine takılmadan, Gemini 2.0 Flash ile numara çıkarımı yapar.
     """
     prompt = (
-        "Aşağıdaki metin bir Türk lojistik/gümrük e-faturasına ait sayfa içeriğidir.\n"
-        "Bu metinden 3 tür numara çıkar. Numaralar Not satırlarında yazıyor olabilir.\n\n"
-
-        "1. KONŞİMENTO NUMARASI\n"
-        "   Etiketler: Konsimento, Konsimento No, B/L, BL, Bill of Lading\n"
-        "   Not satirlarinda da olabilir: Not 11: Konsimento :MEDUFB089573\n"
-        "   Ornek: SPE041901781, MEDUFB089573, HLCUIST2501XXXXX\n\n"
-
-        "2. KONTEYNER NUMARASI — ISO 6346\n"
-        "   Format: 4 buyuk harf + 7 rakam\n"
-        "   Virgülle ayrilmis birden fazla olabilir\n"
-        "   Ornek: ARKU2438358, MSMU7499454\n\n"
-
-        "3. BEYANNAME NUMARASI — Turk Gümrük\n"
-        "   Format: 5 rakam + 2 harf (IM/AN/EX/IH) + 8 rakam\n"
-        "   Not satirlarinda: Not 3: Beyanname No: 26410500IM00045602\n"
-        "   Ornek: 26410500IM00045784\n\n"
-
-        "KURALLAR:\n"
-        "- Fatura no (YLP...), ETTN, GUID, vergi no ALMA\n"
-        "- Not satirlarina ozellikle dikkat et\n"
-        "- SADECE JSON dondur:\n"
+        "Aşağıdaki gümrük faturası metninden 3 tür numara çıkar:\n"
+        "1. KONŞİMENTO: (Örn: SPE041901781, MEDUFB089573)\n"
+        "2. KONTEYNER: (Örn: ARKU2438358, MSMU7499454)\n"
+        "3. BEYANNAME: (Örn: 26410500IM00045602)\n\n"
+        "SADECE JSON dondur:\n"
         '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
-        f"--- FATURA ---\n{metin[:12000]}\n--- BITIS ---"
+        f"--- FATURA ---\n{metin[:12000]}"
     )
 
     try:
@@ -422,52 +404,34 @@ def claude_ile_numaralari_cek(metin):
             GEMINI_URL,
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0, "maxOutputTokens": 500}
+                "generationConfig": {"temperature": 0}
             },
             timeout=30
         )
         if response.status_code != 200:
-            log.error(f"Gemini HTTP {response.status_code}")
             return None
 
         data = response.json()
         raw = data["candidates"][0]["content"]["parts"][0]["text"]
-        temiz = re.sub(r"```json|```", "", raw).strip()
-        sonuc = json.loads(temiz)
-        sonuc.setdefault("konsimento_list", [])
-        sonuc.setdefault("konteyner_list", [])
-        sonuc.setdefault("beyanname_list", [])
-
-        hic_yok = not any([
-            sonuc["konsimento_list"],
-            sonuc["konteyner_list"],
-            sonuc["beyanname_list"]
-        ])
-        return None if hic_yok else sonuc
-
+        # JSON dışındaki fazlalıkları temizler
+        temiz = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(temiz)
     except Exception as e:
         log.error(f"Gemini hatası: {e}")
         return None
 
-
 def gemini_numaralari_kadir(metin):
     """
-    Hibrit numara çıkarım motoru:
-    1. Önce regex ile standart formatlarda ara (hızlı, ücretsiz)
-    2. Bulamazsa Claude Haiku'ya gönder (yavaş, ücretli ama güvenilir)
+    Hibrit motor: Önce hızlı Regex, bulamazsa Gemini.
     """
-    # Adım 1: Regex
+    # Önce kodundaki mevcut regex fonksiyonunu dener
     sonuc = regex_ile_numaralari_cek(metin)
     if sonuc:
-        log.info(f"Regex ile bulundu → "
-                 f"Konşimento: {len(sonuc['konsimento_list'])} "
-                 f"| Konteyner: {len(sonuc['konteyner_list'])} "
-                 f"| Beyanname: {len(sonuc['beyanname_list'])}")
         return sonuc
 
-    # Adım 2: Claude
-    log.info("Regex bulamadı, Claude'a gönderiliyor...")
-    return claude_ile_numaralari_cek(metin)
+    # Regex bulamazsa Gemini'ye sorar
+    log.info("Regex sonuç vermedi, Gemini devreye giriyor...")
+    return gemini_ile_numaralari_cek(metin)
 
 
 # ════════════════════════════════════════════════════════════
