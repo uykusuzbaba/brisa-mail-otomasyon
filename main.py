@@ -910,6 +910,9 @@ def main():
             beklemeye += 1
 
         gmail_okundu_isaretle(gmail, email_id)
+        
+        # Her fatura arasında 3 saniye bekle (edoksis rate limit önleme)
+        time.sleep(3)
 
     # Bekleyenleri yeniden dene
     bekleyenler = db_bekleyenleri_getir(conn)
