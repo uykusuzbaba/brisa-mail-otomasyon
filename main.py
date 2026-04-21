@@ -543,13 +543,17 @@ def gemini_numaralari_kadir(metin):
 #  GOOGLE SHEETS — REFERANS VERİSİ
 # ════════════════════════════════════════════════════════════
 
-def sheets_referans_veri():
+def _sheets_creds():
+    """Sheets API için kimlik bilgisi döndürür (tekrar kullanım için)."""
     token_data = json.loads(GMAIL_TOKEN_JSON)
     creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
+    return creds
 
-    servis = build("sheets", "v4", credentials=creds)
+
+def sheets_referans_veri():
+    servis = build("sheets", "v4", credentials=_sheets_creds())
     try:
         result = servis.spreadsheets().values().get(
             spreadsheetId=SHEETS_ID,
@@ -600,12 +604,7 @@ def sheets_referans_veri():
 
 
 def sheets_eslesmeyiKaydet(gonderen, konu, tarih, dosya_no, kriter, deger):
-    token_data = json.loads(GMAIL_TOKEN_JSON)
-    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-
-    servis = build("sheets", "v4", credentials=creds)
+    servis = build("sheets", "v4", credentials=_sheets_creds())
     simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     try:
@@ -623,12 +622,7 @@ def sheets_eslesmeyiKaydet(gonderen, konu, tarih, dosya_no, kriter, deger):
 
 
 def sheets_okunamayanEkle(gonderen, konu, tarih, sebep, fatura_url=None):
-    token_data = json.loads(GMAIL_TOKEN_JSON)
-    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-
-    servis = build("sheets", "v4", credentials=creds)
+    servis = build("sheets", "v4", credentials=_sheets_creds())
     simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     try:
@@ -661,6 +655,77 @@ def sheets_fatura_islendi_mi(servis, email_id):
     return False
 
 
+def sheets_bekleyenleri_getir(servis):
+    """
+    📑 Fatura Listesi'nden 🟡 Bekliyor durumundaki tüm satırları okur.
+    Her satır için numaraları, email_id'yi ve satır numarasını döndürür.
+    SQLite'a bağımlılık yok — Sheets kalıcı kaynak olarak kullanılır.
+    """
+    try:
+        result = servis.spreadsheets().values().get(
+            spreadsheetId=SHEETS_ID,
+            range="📑 Fatura Listesi!A:K"
+        ).execute()
+    except HttpError as e:
+        log.error(f"Bekleyen okuma hatası: {e}")
+        return []
+
+    rows = result.get("values", [])
+    if len(rows) < 2:
+        return []
+
+    bekleyenler = []
+    for i, row in enumerate(rows[1:], start=2):  # start=2: header + 1-indexed
+        padded = row + [""] * (11 - len(row))
+        durum_hucre = padded[6].strip()  # G: Durum
+
+        if "Bekliyor" not in durum_hucre:
+            continue
+
+        # D/E/F kolonlarından numaraları parse et
+        konsimento_str = padded[3].strip()   # D
+        konteyner_str  = padded[4].strip()   # E
+        beyanname_str  = padded[5].strip()   # F
+
+        numaralar = {
+            "konsimento_list": [v.strip() for v in konsimento_str.split(",") if v.strip()],
+            "konteyner_list":  [v.strip() for v in konteyner_str.split(",")  if v.strip()],
+            "beyanname_list":  [v.strip() for v in beyanname_str.split(",")  if v.strip()],
+        }
+
+        # Hiç numara yoksa atla (okunamayan satır)
+        if not any(numaralar.values()):
+            continue
+
+        bekleyenler.append({
+            "satir_no":  i,
+            "gonderen":  padded[2].strip(),   # C
+            "tarih":     padded[1].strip(),   # B
+            "email_id":  padded[10].strip(),  # K
+            "numaralar": numaralar,
+        })
+
+    log.info(f"Sheets'te {len(bekleyenler)} bekleyen fatura bulundu.")
+    return bekleyenler
+
+
+def sheets_bekleyeni_guncelle(servis, satir_no, dosya_no, kriter, deger):
+    """
+    Eşleşen bekleyen satırın Durum (G) ve Dosya No (H) kolonlarını günceller.
+    satir_no: Sheets'teki gerçek satır numarası (1-indexed, header=1)
+    """
+    try:
+        servis.spreadsheets().values().update(
+            spreadsheetId=SHEETS_ID,
+            range=f"📑 Fatura Listesi!G{satir_no}:H{satir_no}",
+            valueInputOption="RAW",
+            body={"values": [["✅ Eşleşti", dosya_no]]}
+        ).execute()
+        log.info(f"Satır {satir_no} güncellendi → {dosya_no} ({kriter}: {deger})")
+    except HttpError as e:
+        log.error(f"Bekleyen güncelleme hatası (satır {satir_no}): {e}")
+
+
 def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
                              dosya_no="", fatura_url="", email_id=""):
     """
@@ -668,12 +733,7 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
     Email ID kontrolü ile mükerrer kayıt engellenir.
     Durum: "✅ Eşleşti" | "🟡 Bekliyor" | "❌ Okunamadı" | "🔴 Bize Ait Değil"
     """
-    token_data = json.loads(GMAIL_TOKEN_JSON)
-    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-
-    servis = build("sheets", "v4", credentials=creds)
+    servis = build("sheets", "v4", credentials=_sheets_creds())
     simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     # Mükerrer kontrol
@@ -982,43 +1042,52 @@ def main():
         # Her fatura arasında 3 saniye bekle (edoksis rate limit önleme)
         time.sleep(3)
 
-    # Bekleyenleri yeniden dene
-    bekleyenler = db_bekleyenleri_getir(conn)
+    # ── Bekleyenleri Sheets'ten yeniden dene ─────────────────
+    # SQLite kalıcı değil (GitHub Actions runner sıfırlanır).
+    # Bekleyenler artık doğrudan 📑 Fatura Listesi!G = 🟡 Bekliyor
+    # satırlarından okunur ve eşleşince aynı satır güncellenir.
+    sheets_servis = build("sheets", "v4", credentials=_sheets_creds())
+    bekleyenler = sheets_bekleyenleri_getir(sheets_servis)
     yeniden_eslesti = 0
 
     for item in bekleyenler:
-        try:
-            numaralar_json = item.get("numaralar") or "{}"
-            numaralar_item = json.loads(numaralar_json)
-        except Exception:
-            continue
-
-        eslesmeler_b = eslestir(numaralar_item, referans)
+        numaralar_item = item["numaralar"]
+        eslesmeler_b   = eslestir(numaralar_item, referans)
         if not eslesmeler_b:
             continue
 
         item_gonderen = item.get("gonderen", "")
-        item_konu     = item.get("konu", "")
         item_tarih    = item.get("tarih", "")
         item_email_id = item.get("email_id", "")
-        item_id       = item.get("id", 0)
+        satir_no      = item["satir_no"]
 
+        dosyalar_str_b = ", ".join(e["dosya_no"] for e in eslesmeler_b)
+        ilk_e = eslesmeler_b[0]
+
+        # ✅ Sheets satırını güncelle (Durum + Dosya No)
+        sheets_bekleyeni_guncelle(
+            sheets_servis, satir_no,
+            dosyalar_str_b, ilk_e["kriter"], ilk_e["deger"]
+        )
+
+        # ✅ Eşleşenler sekmesine de kaydet
         for e in eslesmeler_b:
             sheets_eslesmeyiKaydet(
-                item_gonderen, item_konu, item_tarih,
+                item_gonderen, "", item_tarih,
                 e["dosya_no"], e["kriter"], e["deger"]
             )
 
         # Mail gönderme devre dışı — panel üzerinden takip ediliyor
-        dosyalar_str_b = ", ".join(e["dosya_no"] for e in eslesmeler_b)
-        # html = bildirim_html(item_gonderen, item_konu, item_tarih, eslesmeler_b)
+        # html = bildirim_html(item_gonderen, "", item_tarih, eslesmeler_b)
         # gmail_mail_gonder(
         #     gmail,
         #     f"✅ Fatura Eşleşmesi — {len(eslesmeler_b)} Dosya: {dosyalar_str_b}",
         #     html
         # )
-        db_islendi_ekle(conn, item_email_id, dosyalar_str_b)
-        db_bekleyeni_sil(conn, item_id)
+
+        if item_email_id:
+            db_islendi_ekle(conn, item_email_id, dosyalar_str_b)
+
         yeniden_eslesti += 1
 
     log.info(
