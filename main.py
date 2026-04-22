@@ -258,6 +258,32 @@ def sayfayi_playwright_ile_oku(url):
         return None
 
 
+def turkce_normalize(metin):
+    """
+    Türkçe ve İngilizce karakterleri normalize eder.
+    Büyük/küçük harf + Türkçe karakter farklarını ortadan kaldırır.
+    
+    Örnek: "Gönderen" → "GONDEREN"
+           "İhracat" → "IHRACAT"
+    """
+    if not metin:
+        return ""
+    
+    # Önce büyük harfe çevir
+    metin = metin.upper()
+    
+    # Türkçe karakterleri normalize et
+    tr_map = {
+        'Ç': 'C', 'Ğ': 'G', 'İ': 'I', 'Ö': 'O', 'Ş': 'S', 'Ü': 'U',
+        'ç': 'C', 'ğ': 'G', 'ı': 'I', 'i': 'I', 'ö': 'O', 'ş': 'S', 'ü': 'U'
+    }
+    
+    for tr_char, eng_char in tr_map.items():
+        metin = metin.replace(tr_char, eng_char)
+    
+    return metin
+
+
 def firma_adi_cek(icerik):
     """
     Fatura sayfasının düz metninden gönderici firma adını çeker.
@@ -289,18 +315,41 @@ def bize_ait_mi_kontrol(icerik, html_govde):
 
     Mantık:
     - DLK geçiyorsa: kesinlikle bizim, işleme devam
-    - Solmaz veya Subaşı geçiyorsa: kesinlikle bizim değil
-    - DENİZ İHRACAT NAVLUNU geçiyorsa: bizim değil
+    - Rakip firmalar, ihracat hizmetleri, Brisa gönderici → bizim değil
     - Hiçbiri geçmiyorsa: belirsiz, işleme devam (bekleyene düşer)
 
     Döndürür: (bize_ait: bool, sebep: str)
     """
-    metin = (icerik or "").upper() + " " + (html_govde or "").upper()
+    # Türkçe karakter normalizasyonu ile metni temizle
+    metin_ham = (icerik or "") + " " + (html_govde or "")
+    metin = turkce_normalize(metin_ham)
 
     # DLK geçiyorsa kesinlikle bizim — diğer kontrollere gerek yok
     if "DLK" in metin:
         return True, ""
 
+    # ── RAKIP FİRMALAR (Müşteri Faturaları) ───────────────────
+    # Bu şirketlere ait faturalar bize ait değil
+    rakip_firmalar = [
+        "CABOT",
+        "MITSUI", 
+        "TANAKA",
+        "ZEON CHEMICAL",  # ZEON CHMICALS typo düzeltildi
+        "KOLON",
+        "THAI TOKAI",
+        "HS HYOSUNG",
+        "PYRAMID"
+    ]
+    
+    for firma in rakip_firmalar:
+        if firma in metin:
+            return False, f"{firma} müşteri faturası"
+
+    # ── İHRACAT HİZMETLERİ ─────────────────────────────────────
+    # İhracat Liman ve Operasyonel Hizmetler → bizim değil
+    if "IHRACAT LIMAN" in metin and "OPERASYONEL HIZMET" in metin:
+        return False, "İhracat Liman ve Operasyonel Hizmetler"
+    
     # Deniz ihracat navlunu → bizim değil
     if "DENIZ IHRACAT NAVLUNU" in metin or "DENIZ IHRACAT" in metin:
         return False, "Deniz ihracat navlunu"
@@ -309,13 +358,19 @@ def bize_ait_mi_kontrol(icerik, html_govde):
     if "KONTEYNER VGM" in metin or "VGM HIZMET" in metin:
         return False, "Konteyner VGM Hizmeti"
 
-    # Rakip gümrükçü firmaları → kesinlikle bizim değil
-    # Ama önce Brisa'nın kendi email adresini (ithalat.brisa@subasi.net) hariç tut
+    # ── YÜKLEYİCİ/GÖNDERİCİ BRISA ──────────────────────────────
+    # "Yükleyici: Brisa" veya "Gönderici: Brisa" → bizim değil (bizim gönderdiğimiz)
+    yukleyici_pattern = r'(YUKLEYICI|GONDERICI|SHIPPER|CONSIGNOR)[:\s]*BRISA'
+    if re.search(yukleyici_pattern, metin):
+        return False, "Yükleyici/Gönderici Brisa (ihracat faturası)"
+
+    # ── RAKİP GÜMRÜKÇÜLER ──────────────────────────────────────
+    # Önce Brisa'nın kendi email adresini (ithalat.brisa@subasi.net) hariç tut
     metin_email_haric = metin.replace("ITHALAT.BRISA@SUBASI.NET", "").replace("@SUBASI.NET", "")
     
-    if "SOLMAZ GUMRUK" in metin_email_haric or "SOLMAZ GÜMRÜK" in metin_email_haric:
+    if "SOLMAZ GUMRUK" in metin_email_haric:
         return False, "Solmaz Gümrük Müşavirliği faturası"
-    if "SUBASI GUMRUK" in metin_email_haric or "SUBAŞI GÜMRÜK" in metin_email_haric:
+    if "SUBASI GUMRUK" in metin_email_haric:
         return False, "Subaşı Gümrük Müşavirliği faturası"
 
     # Hiçbiri geçmiyorsa → belirsiz, normal işleme devam et
@@ -383,11 +438,16 @@ def regex_ile_numaralari_cek(metin):
     konsimentolar = []
     
     # 1. Etiket yanındaki alfanümerik kod
-    kon_etiket = r'(?:KON[Şs]IMENTO|B/?L|BILL OF LADING|BL NO)[^A-Z0-9]{0,15}([A-Z0-9\-]{6,25})'
+    # AWB, HOUSE AWB, HAWB eklendi
+    kon_etiket = r'(?:KON[Ss]IMENTO|B/?L|BILL OF LADING|BL NO|AWB|HOUSE AWB|HAWB|MASTER AWB|MAWB)[^A-Z0-9]{0,15}([A-Z0-9\-,\s]{6,80})'
     for m in re.finditer(kon_etiket, metin_upper):
-        kod = m.group(1).strip()
-        if kod and not kod.startswith('YLP') and not kod.startswith('TR1') and not kod.startswith('TK'):
-            konsimentolar.append(kod)
+        kod_ham = m.group(1).strip()
+        # Virgülle ayrılmış olabilir: "SPE041901781, SPE041901782"
+        # Her birini ayrı numara olarak al
+        parcalar = [k.strip() for k in re.split(r'[,\s]+', kod_ham) if k.strip()]
+        for kod in parcalar:
+            if len(kod) >= 6 and not kod.startswith('YLP') and not kod.startswith('TR1') and not kod.startswith('TK'):
+                konsimentolar.append(kod)
     
     # 2. Tire ile ayrılmış: 205-75999114, 61598712294-11
     kon_tire = r'\b(\d{3,11}-\d{5,11})\b'
@@ -411,8 +471,8 @@ def regex_ile_numaralari_cek(metin):
     for m in re.finditer(awb_10, metin_upper):
         awb_list.append(m.group(1))
     
-    # 2. AWB/HİZMET yanında: 10 rakam
-    awb_hizmet = r'AWB[/\s]*H[İI]ZMET[:\s]*(\d{10})\b'
+    # 2. AWB/HİZMET yanında: 10 rakam (Türkçe karakter normalize)
+    awb_hizmet = r'AWB[/\s]*H[II]ZMET[:\s]*(\d{10})\b'
     for m in re.finditer(awb_hizmet, metin_upper):
         awb_list.append(m.group(1))
     
@@ -420,6 +480,15 @@ def regex_ile_numaralari_cek(metin):
     awb_tire = r'AWB\s*NO[:\s]*(\d{3}-\d{8})\b'
     for m in re.finditer(awb_tire, metin_upper):
         awb_list.append(m.group(1))
+    
+    # 4. House AWB formatı: virgülle ayrılmış olabilir
+    house_awb = r'(?:HOUSE\s*AWB|HAWB)[:\s]*([A-Z0-9\-,\s]{6,80})'
+    for m in re.finditer(house_awb, metin_upper):
+        kod_ham = m.group(1).strip()
+        parcalar = [k.strip() for k in re.split(r'[,\s]+', kod_ham) if k.strip()]
+        for kod in parcalar:
+            if len(kod) >= 6:
+                awb_list.append(kod)
     
     # AWB'leri konşimento listesine ekle (aynı kategoride)
     konsimentolar.extend(awb_list)
