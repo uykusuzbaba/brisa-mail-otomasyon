@@ -622,14 +622,39 @@ def _sheets_creds():
 
 
 def sheets_referans_veri():
+    """
+    Referans verisini okur. Google Sheets geçici hatalar verebilir,
+    bu yüzden 3 deneme yapar (503, 429 hatalarında).
+    """
     servis = build("sheets", "v4", credentials=_sheets_creds())
-    try:
-        result = servis.spreadsheets().values().get(
-            spreadsheetId=SHEETS_ID,
-            range="📋 Referans!A:D"
-        ).execute()
-    except HttpError as e:
-        log.error(f"Sheets okuma hatası: {e}")
+    
+    # 3 deneme yap
+    for deneme in range(3):
+        try:
+            result = servis.spreadsheets().values().get(
+                spreadsheetId=SHEETS_ID,
+                range="📋 Referans!A:D"
+            ).execute()
+            break  # Başarılı olduysa döngüden çık
+            
+        except HttpError as e:
+            # 503 (Servis kullanılamıyor) veya 429 (Rate limit)
+            if e.resp.status in [503, 429]:
+                bekleme = 5 * (deneme + 1)  # 5s, 10s, 15s
+                log.warning(
+                    f"Sheets geçici hata ({e.resp.status}) — "
+                    f"{bekleme}s bekleniyor (deneme {deneme+1}/3)"
+                )
+                if deneme < 2:  # Son denemede bekleme
+                    time.sleep(bekleme)
+                    continue
+            
+            # Diğer hatalar veya 3 deneme de başarısız
+            log.error(f"Sheets okuma hatası: {e}")
+            return []
+    else:
+        # 3 deneme de başarısız (break olmadı)
+        log.error("Sheets 3 denemede okunamadı")
         return []
 
     rows = result.get("values", [])
@@ -730,13 +755,24 @@ def sheets_bekleyenleri_getir(servis):
     Her satır için numaraları, email_id'yi ve satır numarasını döndürür.
     SQLite'a bağımlılık yok — Sheets kalıcı kaynak olarak kullanılır.
     """
-    try:
-        result = servis.spreadsheets().values().get(
-            spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!A:K"
-        ).execute()
-    except HttpError as e:
-        log.error(f"Bekleyen okuma hatası: {e}")
+    # 3 deneme yap (Google Sheets geçici hatalar verebilir)
+    for deneme in range(3):
+        try:
+            result = servis.spreadsheets().values().get(
+                spreadsheetId=SHEETS_ID,
+                range="📑 Fatura Listesi!A:K"
+            ).execute()
+            break  # Başarılı
+        except HttpError as e:
+            if e.resp.status in [503, 429]:
+                bekleme = 5 * (deneme + 1)
+                log.warning(f"Bekleyen okuma geçici hata — {bekleme}s bekleniyor")
+                if deneme < 2:
+                    time.sleep(bekleme)
+                    continue
+            log.error(f"Bekleyen okuma hatası: {e}")
+            return []
+    else:
         return []
 
     rows = result.get("values", [])
