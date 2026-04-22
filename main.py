@@ -771,6 +771,7 @@ def sheets_bekleyenleri_getir(servis):
             "gonderen":  padded[2].strip(),   # C
             "tarih":     padded[1].strip(),   # B
             "email_id":  padded[10].strip(),  # K
+            "fatura_url": padded[8].strip() if len(padded) > 8 else "",  # I: Fatura Linki
             "numaralar": numaralar,
         })
 
@@ -793,6 +794,23 @@ def sheets_bekleyeni_guncelle(servis, satir_no, dosya_no, kriter, deger):
         log.info(f"Satır {satir_no} güncellendi → {dosya_no} ({kriter}: {deger})")
     except HttpError as e:
         log.error(f"Bekleyen güncelleme hatası (satır {satir_no}): {e}")
+
+
+def sheets_bekleyeni_aitdegil_guncelle(servis, satir_no, sebep):
+    """
+    Bekleyen satırı "Bize Ait Değil" olarak günceller.
+    satir_no: Sheets'teki gerçek satır numarası (1-indexed, header=1)
+    """
+    try:
+        servis.spreadsheets().values().update(
+            spreadsheetId=SHEETS_ID,
+            range=f"📑 Fatura Listesi!G{satir_no}",
+            valueInputOption="RAW",
+            body={"values": [[f"🔴 Bize Ait Değil | {sebep}"]]}
+        ).execute()
+        log.info(f"Satır {satir_no} → Bize Ait Değil ({sebep})")
+    except HttpError as e:
+        log.error(f"Bekleyen eleme hatası (satır {satir_no}): {e}")
 
 
 def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
@@ -1118,17 +1136,55 @@ def main():
     sheets_servis = build("sheets", "v4", credentials=_sheets_creds())
     bekleyenler = sheets_bekleyenleri_getir(sheets_servis)
     yeniden_eslesti = 0
+    bekleyen_elenen = 0  # Yeni sayaç
 
     for item in bekleyenler:
-        numaralar_item = item["numaralar"]
-        eslesmeler_b   = eslestir(numaralar_item, referans)
-        if not eslesmeler_b:
-            continue
-
         item_gonderen = item.get("gonderen", "")
         item_tarih    = item.get("tarih", "")
         item_email_id = item.get("email_id", "")
         satir_no      = item["satir_no"]
+        numaralar_item = item["numaralar"]
+        
+        # ── YENİ: Bekleyenleri eleme kurallarından geçir ──────────
+        # Sadece gönderen firma adına bakarak kontrol et (Playwright olmadan)
+        # Fatura içeriğine erişemediğimiz için sadece firma adı kontrolü yapıyoruz
+        gonderen_normalize = turkce_normalize(item_gonderen)
+        
+        # Rakip firmalar kontrolü
+        rakip_firmalar = [
+            "CABOT", "MITSUI", "TANAKA", "ZEON CHEMICAL",
+            "KOLON", "THAI TOKAI", "HS HYOSUNG", "PYRAMID"
+        ]
+        
+        elenmis = False
+        eleme_sebebi = ""
+        
+        for firma in rakip_firmalar:
+            if firma in gonderen_normalize:
+                elenmis = True
+                eleme_sebebi = f"{firma} müşteri faturası"
+                break
+        
+        # Eğer elendiyse, Sheets'te güncelle ve devam et
+        if elenmis:
+            log.info(f"Bekleyen satır {satir_no} elendi: {eleme_sebebi}")
+            sheets_bekleyeni_aitdegil_guncelle(sheets_servis, satir_no, eleme_sebebi)
+            bekleyen_elenen += 1
+            continue
+        
+        # ── Eşleştirme denemesi ────────────────────────────────────
+        # Debug log: Bekleyen numaralarını göster
+        log.info(
+            f"Bekleyen satır {satir_no}: "
+            f"Kon={numaralar_item.get('konsimento_list', [])} | "
+            f"Knt={numaralar_item.get('konteyner_list', [])} | "
+            f"Bey={numaralar_item.get('beyanname_list', [])}"
+        )
+        
+        eslesmeler_b = eslestir(numaralar_item, referans)
+        if not eslesmeler_b:
+            log.info(f"Satır {satir_no}: Eşleşme bulunamadı")
+            continue
 
         dosyalar_str_b = ", ".join(e["dosya_no"] for e in eslesmeler_b)
         ilk_e = eslesmeler_b[0]
@@ -1163,7 +1219,8 @@ def main():
         f"═══ Bitti → Eşleşti: {eslesti} | "
         f"Beklemeye: {beklemeye} | "
         f"Okunamadı: {okunamadi} | "
-        f"Bekleyenden eşleşti: {yeniden_eslesti} ═══"
+        f"Bekleyenden eşleşti: {yeniden_eslesti} | "
+        f"Bekleyenden elenen: {bekleyen_elenen} ═══"
     )
     conn.close()
 
