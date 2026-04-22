@@ -774,6 +774,10 @@ def sheets_bekleyenleri_getir(servis):
             "fatura_url": padded[8].strip() if len(padded) > 8 else "",  # I: Fatura Linki
             "numaralar": numaralar,
         })
+        
+        # DEBUG: İlk 3 bekleyeni logla
+        if len(bekleyenler) <= 3:
+            log.info(f"DEBUG - Satır {i}: Gönderen='{padded[2][:30]}' | URL_index_8='{padded[8][:50] if len(padded) > 8 else 'BOŞ'}'")
 
     log.info(f"Sheets'te {len(bekleyenler)} bekleyen fatura bulundu.")
     return bekleyenler
@@ -1142,12 +1146,14 @@ def main():
         item_gonderen = item.get("gonderen", "")
         item_tarih    = item.get("tarih", "")
         item_email_id = item.get("email_id", "")
+        item_fatura_url = item.get("fatura_url", "")
         satir_no      = item["satir_no"]
         numaralar_item = item["numaralar"]
         
-        # ── YENİ: Bekleyenleri eleme kurallarından geçir ──────────
-        # Sadece gönderen firma adına bakarak kontrol et (Playwright olmadan)
-        # Fatura içeriğine erişemediğimiz için sadece firma adı kontrolü yapıyoruz
+        # DEBUG: URL var mı kontrol et
+        log.info(f"Bekleyen satır {satir_no}: URL='{item_fatura_url}' (uzunluk: {len(item_fatura_url)})")
+        
+        # ── AŞAMA 1: Gönderen firma adı kontrolü (hızlı) ──────────
         gonderen_normalize = turkce_normalize(item_gonderen)
         
         # Rakip firmalar kontrolü
@@ -1165,14 +1171,35 @@ def main():
                 eleme_sebebi = f"{firma} müşteri faturası"
                 break
         
-        # Eğer elendiyse, Sheets'te güncelle ve devam et
+        # AŞAMA 1'de elendiyse, güncelle ve devam et
         if elenmis:
-            log.info(f"Bekleyen satır {satir_no} elendi: {eleme_sebebi}")
+            log.info(f"Bekleyen satır {satir_no} elendi (firma adı): {eleme_sebebi}")
             sheets_bekleyeni_aitdegil_guncelle(sheets_servis, satir_no, eleme_sebebi)
             bekleyen_elenen += 1
             continue
         
-        # ── Eşleştirme denemesi ────────────────────────────────────
+        # ── AŞAMA 2: Fatura içeriği kontrolü (yavaş ama kapsamlı) ─
+        # Fatura URL'si varsa, Playwright ile sayfayı açıp tam kontrol et
+        if item_fatura_url:
+            log.info(f"Bekleyen satır {satir_no}: Fatura içeriği kontrol ediliyor... URL: {item_fatura_url[:80]}")
+            
+            # Playwright ile sayfayı oku
+            icerik = sayfayi_playwright_ile_oku(item_fatura_url)
+            
+            if icerik:
+                # Tam eleme kontrolü (İhracat, Yükleyici Brisa, vb.)
+                # Mail gövdesi yok, sadece sayfa içeriği var
+                bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, "")
+                
+                if not bize_ait:
+                    log.info(f"Bekleyen satır {satir_no} elendi (fatura içeriği): {sahip_olmama_sebebi}")
+                    sheets_bekleyeni_aitdegil_guncelle(sheets_servis, satir_no, sahip_olmama_sebebi)
+                    bekleyen_elenen += 1
+                    continue
+            else:
+                log.warning(f"Bekleyen satır {satir_no}: Fatura sayfası okunamadı, eşleştirmeye devam")
+        
+        # ── AŞAMA 3: Eşleştirme denemesi ──────────────────────────
         # Debug log: Bekleyen numaralarını göster
         log.info(
             f"Bekleyen satır {satir_no}: "
