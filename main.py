@@ -633,7 +633,7 @@ def sheets_referans_veri():
         try:
             result = servis.spreadsheets().values().get(
                 spreadsheetId=SHEETS_ID,
-                range="📋 Referans!A:D"
+                range="📋 Referans!A:E"  # E kolonunu da al (Kullanıcı)
             ).execute()
             break  # Başarılı olduysa döngüden çık
             
@@ -663,10 +663,12 @@ def sheets_referans_veri():
 
     kayitlar = []
     for row in rows[1:]:
-        padded = row + [None] * (4 - len(row))
+        padded = row + [None] * (5 - len(row))  # 5'e çıkardık (E kolonu için)
         dosya = str(padded[3]).strip() if padded[3] else None
         if not dosya:
             continue
+        
+        kullanici = str(padded[4]).strip() if padded[4] else ""  # E kolonu: Kullanıcı
 
         # Konteyner sütununda virgülle ayrılmış birden fazla numara olabilir
         # Örnek: "ARKU2438358, TCKU1234567, MSCU9876543"
@@ -691,6 +693,7 @@ def sheets_referans_veri():
             "konteyner_listesi":  konteyner_listesi,
             "beyanname_listesi":  beyanname_listesi,
             "dosya_no":           dosya,
+            "kullanici":          kullanici,  # YENİ: Kullanıcı bilgisi
         })
 
     log.info(f"Sheets'ten {len(kayitlar)} kayıt okundu.")
@@ -854,7 +857,7 @@ def sheets_bekleyeni_aitdegil_guncelle(servis, satir_no, sebep):
 
 
 def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
-                             dosya_no="", fatura_url="", email_id=""):
+                             dosya_no="", fatura_url="", email_id="", kullanici=""):
     """
     Tüm faturaları tek bir listede tutar.
     Email ID kontrolü ile mükerrer kayıt engellenir.
@@ -876,7 +879,7 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
     try:
         servis.spreadsheets().values().append(
             spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!A:K",
+            range="📑 Fatura Listesi!A:L",  # L kolonuna kadar
             valueInputOption="RAW",
             body={"values": [[
                 simdi,       # A: Geliş Tarihi
@@ -890,6 +893,7 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
                 fatura_url,  # I: Fatura Linki
                 "",          # J: İşlemi Yapan
                 email_id,    # K: Email ID (mükerrer kontrol için)
+                kullanici,   # L: Kullanıcı (YENİ)
             ]]}
         ).execute()
     except HttpError as e:
@@ -923,13 +927,19 @@ def eslestir(numaralar, referans):
 
     for row in referans:
         dosya = row.get("dosya_no")
+        kullanici = row.get("kullanici", "")  # Kullanıcı bilgisi
         if not dosya or dosya in gorulmus_dosyalar:
             continue
 
         # Konşimento eşleşmesi
         for r_kon in row.get("konsimento_listesi", []):
             if r_kon and r_kon in f_konsimentolar:
-                eslesmeler.append({"dosya_no": dosya, "kriter": "Konşimento No", "deger": r_kon})
+                eslesmeler.append({
+                    "dosya_no": dosya, 
+                    "kriter": "Konşimento No", 
+                    "deger": r_kon,
+                    "kullanici": kullanici  # YENİ
+                })
                 gorulmus_dosyalar.add(dosya)
                 break
 
@@ -939,7 +949,12 @@ def eslestir(numaralar, referans):
         # Konteyner eşleşmesi
         for r_knt in row.get("konteyner_listesi", []):
             if r_knt and r_knt in f_konteynerlar:
-                eslesmeler.append({"dosya_no": dosya, "kriter": "Konteyner No", "deger": r_knt})
+                eslesmeler.append({
+                    "dosya_no": dosya, 
+                    "kriter": "Konteyner No", 
+                    "deger": r_knt,
+                    "kullanici": kullanici  # YENİ
+                })
                 gorulmus_dosyalar.add(dosya)
                 break
 
@@ -962,7 +977,12 @@ def eslestir(numaralar, referans):
                 
                 # Son 6 rakam eşleşirse veya tam eşleşme varsa
                 if (r_son6 and f_son6 and r_son6 == f_son6) or r_bey == f_bey:
-                    eslesmeler.append({"dosya_no": dosya, "kriter": "Beyanname No", "deger": f"{f_bey} ≈ {r_bey}"})
+                    eslesmeler.append({
+                        "dosya_no": dosya, 
+                        "kriter": "Beyanname No", 
+                        "deger": f"{f_bey} ≈ {r_bey}",
+                        "kullanici": kullanici  # YENİ
+                    })
                     gorulmus_dosyalar.add(dosya)
                     break
             
@@ -1149,6 +1169,8 @@ def main():
 
             # Mail gönderme devre dışı — panel üzerinden takip ediliyor
             dosyalar_str = ", ".join(e["dosya_no"] for e in eslesmeler)
+            kullanicilar_str = ", ".join(set(e.get("kullanici", "") for e in eslesmeler if e.get("kullanici")))  # Kullanıcıları birleştir
+            
             # html = bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=url)
             # gmail_mail_gonder(
             #     gmail,
@@ -1157,7 +1179,7 @@ def main():
             # )
             db_islendi_ekle(conn, email_id, dosyalar_str)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
-                                    dosya_no=dosyalar_str, fatura_url=url, email_id=email_id)
+                                    dosya_no=dosyalar_str, fatura_url=url, email_id=email_id, kullanici=kullanicilar_str)
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
