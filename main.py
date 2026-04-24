@@ -251,23 +251,14 @@ def gmail_okundu_isaretle_imap(imap_num):
 # ════════════════════════════════════════════════════════════
 
 def _sheets_creds():
-    """Service Account ile Sheets erişimi (TOKEN YOK!)"""
-    from google.oauth2 import service_account
-    
-    service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
+    """Sheets için Service Account credentials (TOKEN YOK!)"""
+    service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = service_account.Credentials.from_service_account_info(
         service_account_info,
-        scopes=['https://www.googleapis.com/auth/spreadsheets']
+        scopes=SHEETS_SCOPES
     )
+    log.info("✅ Service Account ile Sheets erişimi sağlandı")
     return creds
-    else:
-        # Fallback: Eski GMAIL_TOKEN_JSON kullan (geçiş dönemi)
-        log.warning("⚠️ SHEETS_CREDENTIALS yok, GMAIL_TOKEN_JSON kullanılıyor")
-        token_data = json.loads(os.environ.get("GMAIL_TOKEN_JSON", "{}"))
-        creds = Credentials.from_authorized_user_info(token_data, SHEETS_SCOPES)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        return creds
 
 
 def sheets_servis():
