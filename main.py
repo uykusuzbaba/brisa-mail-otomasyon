@@ -656,6 +656,13 @@ def main():
         return
     
     mailler = gmail_okunmamis_mailler_imap()
+    
+    # 🔥 Batch işleme: Her çalışmada maksimum 50 mail işle (GitHub Actions timeout önleme)
+    MAX_MAIL_PER_RUN = 50
+    if len(mailler) > MAX_MAIL_PER_RUN:
+        log.info(f"⚠️ {len(mailler)} mail bulundu, ilk {MAX_MAIL_PER_RUN} işlenecek")
+        mailler = mailler[:MAX_MAIL_PER_RUN]
+    
     eslesti = beklemeye = okunamadi = 0
     
     for mail in mailler:
