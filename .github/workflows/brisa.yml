@@ -36,4 +36,6 @@ jobs:
           SHEETS_ID:           ${{ secrets.SHEETS_ID }}
           BILDIRIM_ALICISI:    ${{ secrets.BILDIRIM_ALICISI }}
           GONDEREN_LISTESI:    ${{ secrets.GONDEREN_LISTESI }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
         run: python main.py
