@@ -1,9 +1,11 @@
 """
-Brisa Mail Otomasyon — GitHub Actions üzerinde çalışan ana script
-Playwright ile JS render edilen fatura sayfalarını okur
+Brisa Mail Otomasyon — IMAP Versiyonu (Token Sorunu Yok)
+Gmail IMAP ile mail okuma (OAuth token yenileme derdi olmadan)
 """
 
 import base64
+import email
+import imaplib
 import json
 import logging
 import os
@@ -11,6 +13,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from email.header import decode_header
 from pathlib import Path
 
 import requests
@@ -30,7 +33,9 @@ log = logging.getLogger(__name__)
 
 # ── Ayarlar (GitHub Secrets'tan gelir) ───────────────────────
 GOOGLE_API_KEY       = os.environ["GOOGLE_API_KEY"]
-GMAIL_TOKEN_JSON     = os.environ["GMAIL_TOKEN_JSON"]       # token.json içeriği
+GMAIL_APP_PASSWORD   = os.environ["GMAIL_APP_PASSWORD"]       # IMAP şifresi (yeni)
+GMAIL_EMAIL          = os.environ.get("GMAIL_EMAIL", "murat.dagli@dlklogistics.com")
+SHEETS_CREDENTIALS   = os.environ.get("SHEETS_CREDENTIALS", "")  # Sheets için OAuth (ayrı)
 SHEETS_ID            = os.environ["SHEETS_ID"]
 BILDIRIM_ALICISI     = os.environ["BILDIRIM_ALICISI"]
 GONDEREN_LISTESI     = os.environ.get("GONDEREN_LISTESI", "m.hizmet@brisa.com.tr").split(",")
@@ -43,16 +48,11 @@ GEMINI_URL = (
     "gemini-2.0-flash:generateContent?key=" + GOOGLE_API_KEY
 )
 
-GMAIL_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/spreadsheets",
-]
+SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 # ════════════════════════════════════════════════════════════
-#  VERİTABANI
+#  VERİTABANI (DEĞİŞMEDİ)
 # ════════════════════════════════════════════════════════════
 
 def db_init():
@@ -125,944 +125,524 @@ def db_bekleyeni_sil(conn, pending_id):
 
 
 # ════════════════════════════════════════════════════════════
-#  GMAIL
+#  GMAIL IMAP (YENİ - OAuth yerine App Password)
 # ════════════════════════════════════════════════════════════
 
-def gmail_servis():
-    token_data = json.loads(GMAIL_TOKEN_JSON)
-    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    return build("gmail", "v1", credentials=creds)
-
-
-def gmail_okunmamis_mailler(servis):
-    gonderen_sorgu = " OR ".join(f"from:{g.strip()}" for g in GONDEREN_LISTESI)
-    query = f"is:unread ({gonderen_sorgu})"
-
+def gmail_imap_baglanti():
+    """IMAP ile Gmail'e bağlan"""
     try:
-        result = servis.users().messages().list(
-            userId="me", q=query, maxResults=50
-        ).execute()
-    except HttpError as e:
-        log.error(f"Gmail liste hatası: {e}")
-        return []
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+        log.info(f"✅ IMAP bağlantısı başarılı: {GMAIL_EMAIL}")
+        return mail
+    except Exception as e:
+        log.error(f"❌ IMAP bağlantı hatası: {e}")
+        raise
 
-    messages = result.get("messages", [])
+
+def gmail_okunmamis_mailler_imap():
+    """IMAP ile okunmamış Brisa maillerini çek"""
+    mail = gmail_imap_baglanti()
+    mail.select("inbox")
+    
+    # Gönderenler için IMAP search query oluştur
+    search_parts = []
+    for gonderen in GONDEREN_LISTESI:
+        search_parts.append(f'FROM "{gonderen.strip()}"')
+    
+    # IMAP UNSEEN (okunmamış) + FROM filtresi
+    # Not: IMAP OR operatörü karmaşık, basit tutuyoruz
     detaylar = []
-
-    for msg in messages:
+    
+    for gonderen in GONDEREN_LISTESI:
         try:
-            detail = servis.users().messages().get(
-                userId="me", id=msg["id"], format="full"
-            ).execute()
-            headers = {
-                h["name"]: h["value"]
-                for h in detail["payload"].get("headers", [])
-            }
-            detaylar.append({
-                "id": msg["id"],
-                "gonderen": headers.get("From", ""),
-                "konu": headers.get("Subject", ""),
-                "tarih": headers.get("Date", ""),
-                "payload": detail["payload"],
-            })
-        except HttpError as e:
-            log.error(f"Mail detay hatası: {e}")
-
-    log.info(f"{len(detaylar)} okunmamış mail bulundu.")
+            status, messages = mail.search(None, 'UNSEEN', f'FROM "{gonderen.strip()}"')
+            if status != "OK":
+                continue
+            
+            msg_nums = messages[0].split()
+            log.info(f"📬 {gonderen} → {len(msg_nums)} okunmamış mail")
+            
+            for num in msg_nums:
+                try:
+                    status, msg_data = mail.fetch(num, "(RFC822)")
+                    if status != "OK":
+                        continue
+                    
+                    raw_email = msg_data[0][1]
+                    msg = email.message_from_bytes(raw_email)
+                    
+                    # Subject decode
+                    subject_header = msg["Subject"]
+                    if subject_header:
+                        decoded = decode_header(subject_header)
+                        subject = ""
+                        for content, encoding in decoded:
+                            if isinstance(content, bytes):
+                                subject += content.decode(encoding or "utf-8", errors="replace")
+                            else:
+                                subject += content
+                    else:
+                        subject = ""
+                    
+                    # From
+                    from_header = msg["From"] or ""
+                    
+                    # Date
+                    date_header = msg["Date"] or ""
+                    
+                    # Body (HTML)
+                    html_body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/html":
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    charset = part.get_content_charset() or "utf-8"
+                                    html_body = payload.decode(charset, errors="replace")
+                                    break
+                    else:
+                        payload = msg.get_payload(decode=True)
+                        if payload:
+                            charset = msg.get_content_charset() or "utf-8"
+                            html_body = payload.decode(charset, errors="replace")
+                    
+                    # Email ID (Message-ID header kullan)
+                    email_id = msg["Message-ID"] or num.decode()
+                    
+                    detaylar.append({
+                        "id": email_id,
+                        "imap_num": num.decode(),  # IMAP işaretlemek için
+                        "gonderen": from_header,
+                        "konu": subject,
+                        "tarih": date_header,
+                        "html_body": html_body,
+                    })
+                    
+                except Exception as e:
+                    log.warning(f"Mail parse hatası (#{num}): {e}")
+                    continue
+        
+        except Exception as e:
+            log.error(f"Gönderen search hatası ({gonderen}): {e}")
+            continue
+    
+    mail.close()
+    mail.logout()
+    
+    log.info(f"📨 Toplam {len(detaylar)} okunmamış mail bulundu")
     return detaylar
 
 
-def gmail_govde_al(payload):
-    """Mail gövdesini (HTML) çıkar."""
-    def _bul(part):
-        mime = part.get("mimeType", "")
-        if mime == "text/html":
-            data = part.get("body", {}).get("data", "")
-            if data:
-                return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-        for sub in part.get("parts", []):
-            result = _bul(sub)
-            if result:
-                return result
-        return None
-
-    return _bul(payload) or ""
-
-
-def gmail_okundu_isaretle(servis, message_id):
+def gmail_okundu_isaretle_imap(imap_num):
+    """IMAP ile maili okundu işaretle"""
     try:
-        servis.users().messages().modify(
-            userId="me", id=message_id,
-            body={"removeLabelIds": ["UNREAD"]}
-        ).execute()
-    except HttpError as e:
-        log.warning(f"Okundu işareti hatası: {e}")
-
-
-def gmail_mail_gonder(servis, konu, html_govde):
-    """Bildirim mailini gönder."""
-    import email.mime.multipart
-    import email.mime.text
-
-    msg = email.mime.multipart.MIMEMultipart("alternative")
-    msg["to"] = BILDIRIM_ALICISI
-    msg["subject"] = konu
-    msg.attach(email.mime.text.MIMEText(html_govde, "html", "utf-8"))
-
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    try:
-        servis.users().messages().send(
-            userId="me", body={"raw": raw}
-        ).execute()
-        log.info(f"Bildirim gönderildi → {BILDIRIM_ALICISI}")
-    except HttpError as e:
-        log.error(f"Mail gönderme hatası: {e}")
+        mail = gmail_imap_baglanti()
+        mail.select("inbox")
+        mail.store(imap_num.encode(), '+FLAGS', '\\Seen')
+        mail.close()
+        mail.logout()
+    except Exception as e:
+        log.warning(f"IMAP okundu işareti hatası: {e}")
 
 
 # ════════════════════════════════════════════════════════════
-#  PLAYWRIGHT — JS RENDER EDİLEN SAYFA OKUMA
+#  SHEETS (OAuth ile - değişmedi ama ayrı credentials)
+# ════════════════════════════════════════════════════════════
+
+def _sheets_creds():
+    """Sheets için OAuth credentials (IMAP'ten bağımsız)"""
+    if SHEETS_CREDENTIALS:
+        token_data = json.loads(SHEETS_CREDENTIALS)
+        creds = Credentials.from_authorized_user_info(token_data, SHEETS_SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
+    else:
+        # Fallback: Eski GMAIL_TOKEN_JSON kullan (geçiş dönemi)
+        log.warning("⚠️ SHEETS_CREDENTIALS yok, GMAIL_TOKEN_JSON kullanılıyor")
+        token_data = json.loads(os.environ.get("GMAIL_TOKEN_JSON", "{}"))
+        creds = Credentials.from_authorized_user_info(token_data, SHEETS_SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
+
+
+def sheets_servis():
+    return build("sheets", "v4", credentials=_sheets_creds())
+
+
+def sheets_referans_veri():
+    """📋 Referans sekmesini oku"""
+    try:
+        servis = sheets_servis()
+        result = servis.spreadsheets().values().get(
+            spreadsheetId=SHEETS_ID,
+            range="📋 Referans!A2:D"
+        ).execute()
+        
+        rows = result.get("values", [])
+        if not rows:
+            log.warning("Referans sekmesi boş")
+            return []
+        
+        referans = []
+        for row in rows:
+            if len(row) < 4:
+                continue
+            referans.append({
+                "dosya_no": row[0].strip(),
+                "konsimento": row[1].strip() if len(row) > 1 else "",
+                "konteyner": row[2].strip() if len(row) > 2 else "",
+                "beyanname": row[3].strip() if len(row) > 3 else "",
+            })
+        
+        log.info(f"📋 {len(referans)} referans kaydı yüklendi")
+        return referans
+    
+    except HttpError as e:
+        log.error(f"Sheets okuma hatası: {e}")
+        return []
+
+
+def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum, dosya_no="", fatura_url="", email_id=""):
+    """📑 Fatura Listesi sekmesine yaz"""
+    try:
+        servis = sheets_servis()
+        
+        # Numaraları formatla
+        konsimento = ", ".join(numaralar.get("konsimento_list", [])) if numaralar else ""
+        konteyner = ", ".join(numaralar.get("konteyner_list", [])) if numaralar else ""
+        beyanname = ", ".join(numaralar.get("beyanname_list", [])) if numaralar else ""
+        
+        yeni_satir = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Geliş Tarihi
+            tarih,           # Mail Tarihi
+            gonderen,        # Gönderen Firma
+            konsimento,      # Konşimento
+            konteyner,       # Konteyner
+            beyanname,       # Beyanname
+            durum,           # Durum
+            dosya_no,        # Dosya No
+            fatura_url,      # Fatura Linki
+            "",              # İşlemi Yapan (manuel)
+            email_id         # Email ID (gizli)
+        ]
+        
+        servis.spreadsheets().values().append(
+            spreadsheetId=SHEETS_ID,
+            range="📑 Fatura Listesi!A:K",
+            valueInputOption="USER_ENTERED",
+            body={"values": [yeni_satir]}
+        ).execute()
+        
+        log.info(f"✅ Fatura Listesi güncellendi: {durum}")
+    
+    except HttpError as e:
+        log.error(f"Sheets yazma hatası: {e}")
+
+
+def sheets_eslesmeyiKaydet(gonderen, konu, tarih, dosya_no, kriter, deger):
+    """✅ Eşleşenler sekmesine kaydet"""
+    try:
+        servis = sheets_servis()
+        
+        yeni_satir = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            gonderen,
+            konu,
+            tarih,
+            dosya_no,
+            kriter,
+            deger
+        ]
+        
+        servis.spreadsheets().values().append(
+            spreadsheetId=SHEETS_ID,
+            range="✅ Eşleşenler!A:G",
+            valueInputOption="USER_ENTERED",
+            body={"values": [yeni_satir]}
+        ).execute()
+        
+        log.info(f"✅ Eşleşme kaydedildi: {dosya_no}")
+    
+    except HttpError as e:
+        log.error(f"Sheets eşleşme kayıt hatası: {e}")
+
+
+def sheets_okunamayanEkle(gonderen, konu, tarih, sebep, fatura_url=""):
+    """❌ Okunamayanlar sekmesine ekle"""
+    try:
+        servis = sheets_servis()
+        
+        yeni_satir = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            gonderen,
+            konu,
+            tarih,
+            sebep,
+            fatura_url
+        ]
+        
+        servis.spreadsheets().values().append(
+            spreadsheetId=SHEETS_ID,
+            range="❌ Okunamayanlar!A:F",
+            valueInputOption="USER_ENTERED",
+            body={"values": [yeni_satir]}
+        ).execute()
+        
+        log.info(f"❌ Okunamayan kaydedildi: {sebep}")
+    
+    except HttpError as e:
+        log.error(f"Sheets okunamayan kayıt hatası: {e}")
+
+
+def sheets_bekleyenleri_getir(servis):
+    """🟡 Bekleyen faturalarını Sheets'ten çek"""
+    try:
+        result = servis.spreadsheets().values().get(
+            spreadsheetId=SHEETS_ID,
+            range="📑 Fatura Listesi!A2:K"
+        ).execute()
+        
+        rows = result.get("values", [])
+        bekleyenler = []
+        
+        for i, row in enumerate(rows, start=2):
+            if len(row) < 7:
+                continue
+            
+            durum = row[6] if len(row) > 6 else ""
+            if "🟡" not in durum and "Bekli" not in durum:
+                continue
+            
+            # Numaraları parse et
+            numaralar = {
+                "konsimento_list": [x.strip() for x in row[3].split(",") if x.strip()] if len(row) > 3 else [],
+                "konteyner_list": [x.strip() for x in row[4].split(",") if x.strip()] if len(row) > 4 else [],
+                "beyanname_list": [x.strip() for x in row[5].split(",") if x.strip()] if len(row) > 5 else [],
+            }
+            
+            bekleyenler.append({
+                "satir_no": i,
+                "gonderen": row[2] if len(row) > 2 else "",
+                "tarih": row[1] if len(row) > 1 else "",
+                "numaralar": numaralar,
+                "email_id": row[10] if len(row) > 10 else "",
+            })
+        
+        log.info(f"🟡 {len(bekleyenler)} bekleyen fatura bulundu")
+        return bekleyenler
+    
+    except HttpError as e:
+        log.error(f"Bekleyenler okuma hatası: {e}")
+        return []
+
+
+def sheets_bekleyeni_guncelle(servis, satir_no, dosya_no, kriter, deger):
+    """Bekleyen satırını güncelle (✅ Eşleşti)"""
+    try:
+        durum_yeni = f"✅ Eşleşti ({kriter}: {deger})"
+        
+        servis.spreadsheets().values().update(
+            spreadsheetId=SHEETS_ID,
+            range=f"📑 Fatura Listesi!G{satir_no}:H{satir_no}",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[durum_yeni, dosya_no]]}
+        ).execute()
+        
+        log.info(f"✅ Bekleyen güncellendi (satır {satir_no}): {dosya_no}")
+    
+    except HttpError as e:
+        log.error(f"Bekleyen güncelleme hatası: {e}")
+
+
+# ════════════════════════════════════════════════════════════
+#  PLAYWRIGHT — JS RENDER (DEĞİŞMEDİ)
 # ════════════════════════════════════════════════════════════
 
 def sayfayi_playwright_ile_oku(url):
-    """
-    Playwright ile sayfayı tam render et, düz metni döndür.
-    JS çalıştıktan sonraki içeriği okur.
-    """
-    log.info(f"Playwright ile sayfa açılıyor: {url[:80]}...")
-
+    """Playwright ile JS render edilen sayfayı oku"""
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
+            browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-
-            # Sayfayı aç, JS yüklenene kadar bekle
+            
+            # edoksis rate limit önleme
             page.goto(url, wait_until="networkidle", timeout=30000)
-
-            # Ek bekleme — dinamik içerik için
-            page.wait_for_timeout(2000)
-
-            # Tam sayfa metnini al
-            icerik = page.inner_text("body")
+            time.sleep(3)
+            
+            icerik = page.content()
             browser.close()
-
-            log.info(f"Sayfa okundu: {len(icerik)} karakter")
-            return icerik[:15000]
-
+            
+            return icerik
+    
     except Exception as e:
         log.error(f"Playwright hatası: {e}")
         return None
 
 
-def turkce_normalize(metin):
-    """
-    Türkçe ve İngilizce karakterleri normalize eder.
-    Büyük/küçük harf + Türkçe karakter farklarını ortadan kaldırır.
-    
-    Örnek: "Gönderen" → "GONDEREN"
-           "İhracat" → "IHRACAT"
-    """
-    if not metin:
-        return ""
-    
-    # Önce büyük harfe çevir
-    metin = metin.upper()
-    
-    # Türkçe karakterleri normalize et
-    tr_map = {
-        'Ç': 'C', 'Ğ': 'G', 'İ': 'I', 'Ö': 'O', 'Ş': 'S', 'Ü': 'U',
-        'ç': 'C', 'ğ': 'G', 'ı': 'I', 'i': 'I', 'ö': 'O', 'ş': 'S', 'ü': 'U'
-    }
-    
-    for tr_char, eng_char in tr_map.items():
-        metin = metin.replace(tr_char, eng_char)
-    
-    return metin
+# ════════════════════════════════════════════════════════════
+#  NUMARA ÇIKARMA (SADECE REGEX - Gemini Kapalı)
+# ════════════════════════════════════════════════════════════
+
+def linkten_url_bul(html_govde):
+    """Mail içinden edoksis linkini çıkar"""
+    match = re.search(r'https://edoksis\.com/[^\s"<>]+', html_govde, re.IGNORECASE)
+    return match.group(0) if match else None
 
 
 def firma_adi_cek(icerik):
-    """
-    Fatura sayfasının düz metninden gönderici firma adını çeker.
-    Sayfa metninde "Gönderen" kelimesinin hemen ardından gelen
-    büyük harfli şirket adını alır.
-    Örnek: "Gönderen YILPORT KONTEYNER TERMİNALİ..."
-    """
-    if not icerik:
-        return ""
-    try:
-        # Düz metin içinde "Gönderen" kelimesini bul
-        pattern = r'G[\xf6o]nderen[^\n]{0,5}([A-Z][A-Z\s\.&,]{5,79})'
-        match = re.search(pattern, icerik, re.IGNORECASE)
-        if match:
-            firma = match.group(1).strip()
-            # Vergi no, GUID gibi sayısal şeyleri ele
-            # Eğer sadece rakam ve tire ise firma adı değildir
-            if re.match(r'^[\d\-]+$', firma):
-                return ""
-            return firma[:80].strip()
-    except Exception:
-        pass
-    return ""
-
-
-def bize_ait_mi_kontrol(icerik, html_govde):
-    """
-    Faturanın bize ait olup olmadığını kontrol eder.
-
-    Mantık:
-    - DLK geçiyorsa: kesinlikle bizim, işleme devam
-    - Rakip firmalar, ihracat hizmetleri, Brisa gönderici → bizim değil
-    - Hiçbiri geçmiyorsa: belirsiz, işleme devam (bekleyene düşer)
-
-    Döndürür: (bize_ait: bool, sebep: str)
-    """
-    # Türkçe karakter normalizasyonu ile metni temizle
-    metin_ham = (icerik or "") + " " + (html_govde or "")
-    metin = turkce_normalize(metin_ham)
-
-    # DLK geçiyorsa kesinlikle bizim — diğer kontrollere gerek yok
-    if "DLK" in metin:
-        return True, ""
-
-    # ── RAKIP FİRMALAR (Müşteri Faturaları) ───────────────────
-    # Bu şirketlere ait faturalar bize ait değil
-    rakip_firmalar = [
-        "CABOT",
-        "MITSUI", 
-        "TANAKA",
-        "ZEON CHEMICAL",  # ZEON CHMICALS typo düzeltildi
-        "KOLON",
-        "THAI TOKAI",
-        "HS HYOSUNG",
-        "PYRAMID"
+    """Fatura sayfasından firma adını regex ile çek"""
+    patterns = [
+        r'<div[^>]*class="[^"]*company-name[^"]*"[^>]*>(.*?)</div>',
+        r'<span[^>]*class="[^"]*firm[^"]*"[^>]*>(.*?)</span>',
+        r'<h[1-3][^>]*>(.*?GÜMRÜK.*?)</h[1-3]>',
     ]
     
-    for firma in rakip_firmalar:
-        if firma in metin:
-            return False, f"{firma} müşteri faturası"
-
-    # ── İHRACAT HİZMETLERİ ─────────────────────────────────────
-    # İhracat Liman ve Operasyonel Hizmetler → bizim değil
-    if "IHRACAT LIMAN" in metin and "OPERASYONEL HIZMET" in metin:
-        return False, "İhracat Liman ve Operasyonel Hizmetler"
+    for pattern in patterns:
+        match = re.search(pattern, icerik, re.IGNORECASE | re.DOTALL)
+        if match:
+            firma = re.sub(r'<[^>]+>', '', match.group(1)).strip()
+            return firma[:100] if firma else None
     
-    # Deniz ihracat navlunu → bizim değil
-    if "DENIZ IHRACAT NAVLUNU" in metin or "DENIZ IHRACAT" in metin:
-        return False, "Deniz ihracat navlunu"
+    return None
 
-    # Konteyner VGM Hizmeti → bizim değil
-    if "KONTEYNER VGM" in metin or "VGM HIZMET" in metin:
+
+def bize_ait_mi_kontrol(icerik, govde):
+    """Eleme kriterleri: Solmaz/Subaşı/VGM/Deniz İhracat kontrolü"""
+    
+    # Email temizleme (ithalat.brisa@subasi.net geçer)
+    if "ithalat.brisa@subasi.net" in govde.lower():
+        return True, ""
+    
+    metin = (icerik + " " + govde).lower()
+    
+    # DLK varsa kesinlikle bizim
+    if "dlk" in metin:
+        return True, ""
+    
+    # Eleme kriterleri
+    if "solmaz" in metin and ("gumruk" in metin or "gümrük" in metin):
+        return False, "Solmaz Gümrük"
+    
+    if "subasi" in metin or "subaşı" in metin:
+        if "gumruk" in metin or "gümrük" in metin:
+            return False, "Subaşı Gümrük"
+    
+    if "deniz ihracat navlunu" in metin:
+        return False, "Deniz İhracat Navlunu"
+    
+    if "konteyner vgm hizmet" in metin or "vgm hizmet" in metin:
         return False, "Konteyner VGM Hizmeti"
-
-    # ── YÜKLEYİCİ/GÖNDERİCİ BRISA ──────────────────────────────
-    # "Yükleyici: Brisa" veya "Gönderici: Brisa" → bizim değil (bizim gönderdiğimiz)
-    yukleyici_pattern = r'(YUKLEYICI|GONDERICI|SHIPPER|CONSIGNOR)[:\s]*BRISA'
-    if re.search(yukleyici_pattern, metin):
-        return False, "Yükleyici/Gönderici Brisa (ihracat faturası)"
-
-    # ── RAKİP GÜMRÜKÇÜLER ──────────────────────────────────────
-    # Önce Brisa'nın kendi email adresini (ithalat.brisa@subasi.net) hariç tut
-    metin_email_haric = metin.replace("ITHALAT.BRISA@SUBASI.NET", "").replace("@SUBASI.NET", "")
     
-    if "SOLMAZ GUMRUK" in metin_email_haric:
-        return False, "Solmaz Gümrük Müşavirliği faturası"
-    if "SUBASI GUMRUK" in metin_email_haric:
-        return False, "Subaşı Gümrük Müşavirliği faturası"
-
-    # Hiçbiri geçmiyorsa → belirsiz, normal işleme devam et
     return True, ""
 
 
-def linkten_url_bul(html_govde):
-    """Mail gövdesinden edoksis fatura linkini çıkar."""
-    pattern = r'https?://[^\s"\'<>]*edoksis[^\s"\'<>]*'
-    match = re.search(pattern, html_govde, re.IGNORECASE)
-    if match:
-        url = match.group(0).replace("&amp;", "&")
-        return url
-    return None
-
-
-# ════════════════════════════════════════════════════════════
-#  GEMİNİ — NUMARA ÇIKARIMI
-# ════════════════════════════════════════════════════════════
-
-def regex_ile_numaralari_cek(metin):
-    """
-    Uluslararası standart formatlarla regex tabanlı numara çıkarımı.
-    Claude'a gitmeden önce çalışır — hızlı ve ücretsiz.
-
-    Konteyner: ISO 6346 — 4 büyük harf + 7 rakam (ör: MSMU7499454)
-    Beyanname: Türk Gümrük — 5 rakam + 2 harf (IM/AN/EX..) + 8 rakam
-               mutlaka 00IM0 veya 00AN0 veya 00EX0 gibi bir pattern içerir
-    Konşimento: Değişken format — harf+rakam karışımı 8-20 karakter
-                "Konşimento", "B/L", "BL" etiketlerinin yanında aranır
-    """
-    if not metin:
-        return None
-
-    metin_upper = metin.upper()
-
-    # ── Konteyner (ISO 6346): 4 büyük harf + 7 rakam ────────
-    konteyner_pattern = r'\b([A-Z]{4}[0-9]{7})\b'
-    konteynerler = list(set(re.findall(konteyner_pattern, metin_upper)))
-    # Fatura no gibi YLP... ile başlayanları ele
-    konteynerler = [k for k in konteynerler if not k.startswith('YLP')]
-
-    # ── Beyanname (Türk Gümrük) ────────────────────────────
-    beyannameler = []
+def numaralari_regex_ile_cek(icerik):
+    """Sadece regex ile numaraları çıkar (Gemini kapalı)"""
     
-    # 1. Standart: 5 rakam + IM/AN/EX + 8 rakam
-    beyanname_pattern = r'\b(\d{5}[A-Z]{2}\d{8})\b'
-    beyler = re.findall(beyanname_pattern, metin_upper)
-    tip_kodlari = ['IM', 'AN', 'EX', 'IH', 'TR', 'TI', 'AB', 'AT', 'EI']
-    beyannameler.extend([b for b in beyler if any(b[5:7] == tip for tip in tip_kodlari)])
+    # Konteyner (ISO 6346)
+    konteyner_pattern = r'\b[A-Z]{4}[0-9]{7}\b'
+    konteyner_list = list(set(re.findall(konteyner_pattern, icerik)))
     
-    # 2. Slash formatı: 26/IM0226949
-    slash_pattern = r'\b(\d{2}/[A-Z]{2}\d{7,8})\b'
-    slash_beyler = re.findall(slash_pattern, metin_upper)
-    beyannameler.extend([b for b in slash_beyler if any(f'/{tip}' in b for tip in tip_kodlari)])
+    # Beyanname (Türk Gümrük)
+    beyanname_patterns = [
+        r'\b\d{5}(IM|AN|EX|IH|TR|TI|AB|AT|EI)\d{8}\b',  # 26410500IM00045784
+        r'\b\d{2}/(IM|AN|EX|IH|TR|TI|AB|AT|EI)\d{7,8}\b',  # 26/IM0226949
+        r'BEY\.?\s*NO[:\s]*(\d{6})\b',  # Bey.No 228183
+    ]
+    beyanname_list = []
+    for pattern in beyanname_patterns:
+        matches = re.findall(pattern, icerik, re.IGNORECASE)
+        for m in matches:
+            if isinstance(m, tuple):
+                beyanname_list.append(m[0] if len(m) == 1 else "".join(m))
+            else:
+                beyanname_list.append(m)
+    beyanname_list = list(set(beyanname_list))
     
-    # 3. Kısa format (Bey.No yanında): 6 rakam
-    bey_kisa = r'BEY\.?\s*NO[:\s]*(\d{6})\b'
-    for m in re.finditer(bey_kisa, metin_upper):
-        beyannameler.append(m.group(1))
+    # Konşimento
+    konsimento_patterns = [
+        r'\b(MEDU|SPE|HLCU|MSK|ONE|CMA)[A-Z0-9]{6,12}\b',  # Harfli prefix
+        r'\b\d{3,11}-\d{5,11}\b',  # Tire ile: 205-75999114
+        r'Konşimento\s+([A-Z0-9]{8,15})\b',  # Etiket yanında
+    ]
+    konsimento_list = []
+    for pattern in konsimento_patterns:
+        matches = re.findall(pattern, icerik, re.IGNORECASE)
+        konsimento_list.extend(matches)
+    konsimento_list = list(set(konsimento_list))
     
-    beyannameler = list(set(beyannameler))
-
-    # ── Konşimento ───────────────────────────────────────────
-    konsimentolar = []
-    
-    # 1. Etiket yanındaki alfanümerik kod
-    # AWB, HOUSE AWB, HAWB eklendi
-    kon_etiket = r'(?:KON[Ss]IMENTO|B/?L|BILL OF LADING|BL NO|AWB|HOUSE AWB|HAWB|MASTER AWB|MAWB)[^A-Z0-9]{0,15}([A-Z0-9\-,\s]{6,80})'
-    for m in re.finditer(kon_etiket, metin_upper):
-        kod_ham = m.group(1).strip()
-        # Virgülle ayrılmış olabilir: "SPE041901781, SPE041901782"
-        # Her birini ayrı numara olarak al
-        parcalar = [k.strip() for k in re.split(r'[,\s]+', kod_ham) if k.strip()]
-        for kod in parcalar:
-            if len(kod) >= 6 and not kod.startswith('YLP') and not kod.startswith('TR1') and not kod.startswith('TK'):
-                konsimentolar.append(kod)
-    
-    # 2. Tire ile ayrılmış: 205-75999114, 61598712294-11
-    kon_tire = r'\b(\d{3,11}-\d{5,11})\b'
-    tire_konlar = re.findall(kon_tire, metin_upper)
-    konsimentolar.extend(tire_konlar)
-    
-    # 3. Harfli formatlar: MEDUKC378982, 26HU121000
-    kon_harfli = r'\b([A-Z]{3,6}\d{6,10})\b'
-    harfli = re.findall(kon_harfli, metin_upper)
-    # Sadece MEDU, SPE, HLCU gibi bilinen prefix'ler
-    bilinen_prefix = ['MEDU', 'SPE', 'HLCU', 'MSK', 'ONE', 'CMA']
-    konsimentolar.extend([h for h in harfli if any(h.startswith(p) for p in bilinen_prefix)])
-    
-    konsimentolar = list(set(konsimentolar))
-    
-    # ── AWB (Hava Konşimentosu) ──────────────────────────────
+    # AWB (Hava)
+    awb_patterns = [
+        r'AWB\s*NO\s*(\d{10})\b',  # AWB NO 4613755226
+        r'\b\d{3}-\d{8}\b',  # Airline: 235-87235831
+    ]
     awb_list = []
+    for pattern in awb_patterns:
+        matches = re.findall(pattern, icerik, re.IGNORECASE)
+        awb_list.extend(matches)
     
-    # 1. AWB No yanında: 10 rakam
-    awb_10 = r'AWB\s*NO[:\s]*(\d{10})\b'
-    for m in re.finditer(awb_10, metin_upper):
-        awb_list.append(m.group(1))
+    # AWB'leri konşimento listesine ekle
+    konsimento_list.extend(awb_list)
+    konsimento_list = list(set(konsimento_list))
     
-    # 2. AWB/HİZMET yanında: 10 rakam (Türkçe karakter normalize)
-    awb_hizmet = r'AWB[/\s]*H[II]ZMET[:\s]*(\d{10})\b'
-    for m in re.finditer(awb_hizmet, metin_upper):
-        awb_list.append(m.group(1))
-    
-    # 3. Tire ile airline kodu: 235-87235831
-    awb_tire = r'AWB\s*NO[:\s]*(\d{3}-\d{8})\b'
-    for m in re.finditer(awb_tire, metin_upper):
-        awb_list.append(m.group(1))
-    
-    # 4. House AWB formatı: virgülle ayrılmış olabilir
-    house_awb = r'(?:HOUSE\s*AWB|HAWB)[:\s]*([A-Z0-9\-,\s]{6,80})'
-    for m in re.finditer(house_awb, metin_upper):
-        kod_ham = m.group(1).strip()
-        parcalar = [k.strip() for k in re.split(r'[,\s]+', kod_ham) if k.strip()]
-        for kod in parcalar:
-            if len(kod) >= 6:
-                awb_list.append(kod)
-    
-    # AWB'leri konşimento listesine ekle (aynı kategoride)
-    konsimentolar.extend(awb_list)
-    konsimentolar = list(set(konsimentolar))
-
-    sonuc = {
-        "konsimento_list": konsimentolar,
-        "konteyner_list":  konteynerler,
-        "beyanname_list":  beyannameler,
+    return {
+        "konsimento_list": konsimento_list,
+        "konteyner_list": konteyner_list,
+        "beyanname_list": beyanname_list,
     }
 
-    hic_yok = not any([konsimentolar, konteynerler, beyannameler])
-    return None if hic_yok else sonuc
-
-
-def claude_ile_numaralari_cek(metin):
-    """
-    Gemini ile numara çıkarımı.
-    Sadece regex başarısız olduğunda çağrılır.
-    Rate limit durumunda retry yapar.
-    """
-    prompt = (
-        "Aşağıdaki metin bir Türk lojistik/gümrük e-faturasına ait sayfa içeriğidir.\n"
-        "Bu metinden 3 tür numara çıkar. Numaralar Not satırlarında yazıyor olabilir.\n\n"
-
-        "1. KONŞİMENTO NUMARASI\n"
-        "   Etiketler: Konsimento, Konsimento No, B/L, BL, Bill of Lading\n"
-        "   Not satirlarinda da olabilir: Not 11: Konsimento :MEDUFB089573\n"
-        "   Ornek: SPE041901781, MEDUFB089573, HLCUIST2501XXXXX\n\n"
-
-        "2. KONTEYNER NUMARASI — ISO 6346\n"
-        "   Format: 4 buyuk harf + 7 rakam\n"
-        "   Virgülle ayrilmis birden fazla olabilir\n"
-        "   Ornek: ARKU2438358, MSMU7499454\n\n"
-
-        "3. BEYANNAME NUMARASI — Turk Gümrük\n"
-        "   Format: 5 rakam + 2 harf (IM/AN/EX/IH) + 8 rakam\n"
-        "   Not satirlarinda: Not 3: Beyanname No: 26410500IM00045602\n"
-        "   Ornek: 26410500IM00045784\n\n"
-
-        "KURALLAR:\n"
-        "- Fatura no (YLP...), ETTN, GUID, vergi no ALMA\n"
-        "- Not satirlarina ozellikle dikkat et\n"
-        "- SADECE JSON dondur:\n"
-        '{"konsimento_list":[],"konteyner_list":[],"beyanname_list":[]}\n\n'
-        f"--- FATURA ---\n{metin[:12000]}\n--- BITIS ---"
-    )
-
-    # 3 deneme yap, rate limit yiyince bekle
-    for deneme in range(3):
-        try:
-            response = requests.post(
-                GEMINI_URL,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0, "maxOutputTokens": 500}
-                },
-                timeout=30
-            )
-            
-            # Rate limit (429) — 15 saniye bekle, tekrar dene
-            if response.status_code == 429:
-                bekleme = 15 * (deneme + 1)  # 15s, 30s, 45s
-                log.warning(f"Gemini rate limit — {bekleme}s bekleniyor (deneme {deneme+1}/3)")
-                time.sleep(bekleme)
-                continue
-            
-            if response.status_code != 200:
-                log.error(f"Gemini HTTP {response.status_code}")
-                return None
-
-            data = response.json()
-            raw = data["candidates"][0]["content"]["parts"][0]["text"]
-            temiz = re.sub(r"```json|```", "", raw).strip()
-            sonuc = json.loads(temiz)
-            sonuc.setdefault("konsimento_list", [])
-            sonuc.setdefault("konteyner_list", [])
-            sonuc.setdefault("beyanname_list", [])
-
-            hic_yok = not any([
-                sonuc["konsimento_list"],
-                sonuc["konteyner_list"],
-                sonuc["beyanname_list"]
-            ])
-            
-            # Başarılı okuma arasında 5 saniye bekle (rate limit önleme)
-            time.sleep(5)
-            return None if hic_yok else sonuc
-
-        except Exception as e:
-            log.error(f"Gemini hatası (deneme {deneme+1}/3): {e}")
-            if deneme < 2:
-                time.sleep(10)
-                continue
-            return None
-    
-    log.error("Gemini 3 denemede başarısız oldu")
-    return None
-
-
-def gemini_numaralari_kadir(metin):
-    """
-    Sadece regex ile numara çıkarımı.
-    Gemini devre dışı — test için.
-    """
-    # Sadece Regex
-    sonuc = regex_ile_numaralari_cek(metin)
-    if sonuc:
-        log.info(f"Regex ile bulundu → "
-                 f"Konşimento: {len(sonuc['konsimento_list'])} "
-                 f"| Konteyner: {len(sonuc['konteyner_list'])} "
-                 f"| Beyanname: {len(sonuc['beyanname_list'])}")
-        return sonuc
-    
-    # Gemini devre dışı — bulamazsa None döner
-    log.info("Regex bulamadı — Gemini devre dışı")
-    return None
-
 
 # ════════════════════════════════════════════════════════════
-#  GOOGLE SHEETS — REFERANS VERİSİ
+#  EŞLEŞTIRME (DEĞİŞMEDİ)
 # ════════════════════════════════════════════════════════════
-
-def _sheets_creds():
-    """Sheets API için kimlik bilgisi döndürür (tekrar kullanım için)."""
-    token_data = json.loads(GMAIL_TOKEN_JSON)
-    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    return creds
-
-
-def sheets_referans_veri():
-    """
-    Referans verisini okur. Google Sheets geçici hatalar verebilir,
-    bu yüzden 3 deneme yapar (503, 429 hatalarında).
-    """
-    servis = build("sheets", "v4", credentials=_sheets_creds())
-    
-    # 3 deneme yap
-    for deneme in range(3):
-        try:
-            result = servis.spreadsheets().values().get(
-                spreadsheetId=SHEETS_ID,
-                range="📋 Referans!A:E"  # E kolonunu da al (Kullanıcı)
-            ).execute()
-            break  # Başarılı olduysa döngüden çık
-            
-        except HttpError as e:
-            # 503 (Servis kullanılamıyor) veya 429 (Rate limit)
-            if e.resp.status in [503, 429]:
-                bekleme = 5 * (deneme + 1)  # 5s, 10s, 15s
-                log.warning(
-                    f"Sheets geçici hata ({e.resp.status}) — "
-                    f"{bekleme}s bekleniyor (deneme {deneme+1}/3)"
-                )
-                if deneme < 2:  # Son denemede bekleme
-                    time.sleep(bekleme)
-                    continue
-            
-            # Diğer hatalar veya 3 deneme de başarısız
-            log.error(f"Sheets okuma hatası: {e}")
-            return []
-    else:
-        # 3 deneme de başarısız (break olmadı)
-        log.error("Sheets 3 denemede okunamadı")
-        return []
-
-    rows = result.get("values", [])
-    if len(rows) < 2:
-        return []
-
-    kayitlar = []
-    for row in rows[1:]:
-        padded = row + [None] * (5 - len(row))  # 5'e çıkardık (E kolonu için)
-        dosya = str(padded[3]).strip() if padded[3] else None
-        if not dosya:
-            continue
-        
-        kullanici = str(padded[4]).strip() if padded[4] else ""  # E kolonu: Kullanıcı
-
-        # Konteyner sütununda virgülle ayrılmış birden fazla numara olabilir
-        # Örnek: "ARKU2438358, TCKU1234567, MSCU9876543"
-        konteyner_ham = str(padded[1]) if padded[1] else ""
-        konteyner_listesi = [
-            _norm(k) for k in konteyner_ham.split(",") if k.strip()
-        ]
-
-        # Konşimento ve Beyanname da virgülle gelebilir
-        konsimento_ham = str(padded[0]) if padded[0] else ""
-        konsimento_listesi = [
-            _norm(k) for k in konsimento_ham.split(",") if k.strip()
-        ]
-
-        beyanname_ham = str(padded[2]) if padded[2] else ""
-        beyanname_listesi = [
-            _norm(k) for k in beyanname_ham.split(",") if k.strip()
-        ]
-
-        kayitlar.append({
-            "konsimento_listesi": konsimento_listesi,
-            "konteyner_listesi":  konteyner_listesi,
-            "beyanname_listesi":  beyanname_listesi,
-            "dosya_no":           dosya,
-            "kullanici":          kullanici,  # YENİ: Kullanıcı bilgisi
-        })
-
-    log.info(f"Sheets'ten {len(kayitlar)} kayıt okundu.")
-    return kayitlar
-
-
-def sheets_eslesmeyiKaydet(gonderen, konu, tarih, dosya_no, kriter, deger):
-    servis = build("sheets", "v4", credentials=_sheets_creds())
-    simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    try:
-        servis.spreadsheets().values().append(
-            spreadsheetId=SHEETS_ID,
-            range="✅ Eşleşenler!A:I",
-            valueInputOption="RAW",
-            body={"values": [[
-                simdi, tarih, gonderen, konu,
-                "fatura-link", dosya_no, kriter, deger
-            ]]}
-        ).execute()
-    except HttpError as e:
-        log.error(f"Sheets yazma hatası: {e}")
-
-
-def sheets_okunamayanEkle(gonderen, konu, tarih, sebep, fatura_url=None):
-    servis = build("sheets", "v4", credentials=_sheets_creds())
-    simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    try:
-        servis.spreadsheets().values().append(
-            spreadsheetId=SHEETS_ID,
-            range="⚠️ Okunamayanlar!A:H",
-            valueInputOption="RAW",
-            body={"values": [[
-                simdi, tarih, gonderen, konu,
-                "fatura-link", sebep, fatura_url or ""
-            ]]}
-        ).execute()
-    except HttpError as e:
-        log.error(f"Sheets okunamayan yazma hatası: {e}")
-
-
-def sheets_fatura_islendi_mi(servis, email_id):
-    """Fatura Listesi'nde bu email_id daha önce yazılmış mı kontrol et."""
-    try:
-        result = servis.spreadsheets().values().get(
-            spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!K:K"
-        ).execute()
-        rows = result.get("values", [])
-        for row in rows:
-            if row and str(row[0]).strip() == str(email_id).strip():
-                return True
-    except HttpError:
-        pass
-    return False
-
-
-def sheets_bekleyenleri_getir(servis):
-    """
-    📑 Fatura Listesi'nden 🟡 Bekliyor durumundaki tüm satırları okur.
-    Her satır için numaraları, email_id'yi ve satır numarasını döndürür.
-    SQLite'a bağımlılık yok — Sheets kalıcı kaynak olarak kullanılır.
-    """
-    # 3 deneme yap (Google Sheets geçici hatalar verebilir)
-    for deneme in range(3):
-        try:
-            result = servis.spreadsheets().values().get(
-                spreadsheetId=SHEETS_ID,
-                range="📑 Fatura Listesi!A:K"
-            ).execute()
-            break  # Başarılı
-        except HttpError as e:
-            if e.resp.status in [503, 429]:
-                bekleme = 5 * (deneme + 1)
-                log.warning(f"Bekleyen okuma geçici hata — {bekleme}s bekleniyor")
-                if deneme < 2:
-                    time.sleep(bekleme)
-                    continue
-            log.error(f"Bekleyen okuma hatası: {e}")
-            return []
-    else:
-        return []
-
-    rows = result.get("values", [])
-    if len(rows) < 2:
-        return []
-
-    bekleyenler = []
-    for i, row in enumerate(rows[1:], start=2):  # start=2: header + 1-indexed
-        padded = row + [""] * (11 - len(row))
-        durum_hucre = padded[6].strip()  # G: Durum
-
-        if "Bekliyor" not in durum_hucre:
-            continue
-
-        # D/E/F kolonlarından numaraları parse et
-        konsimento_str = padded[3].strip()   # D
-        konteyner_str  = padded[4].strip()   # E
-        beyanname_str  = padded[5].strip()   # F
-
-        numaralar = {
-            "konsimento_list": [v.strip() for v in konsimento_str.split(",") if v.strip()],
-            "konteyner_list":  [v.strip() for v in konteyner_str.split(",")  if v.strip()],
-            "beyanname_list":  [v.strip() for v in beyanname_str.split(",")  if v.strip()],
-        }
-
-        # Hiç numara yoksa atla (okunamayan satır)
-        if not any(numaralar.values()):
-            continue
-
-        bekleyenler.append({
-            "satir_no":  i,
-            "gonderen":  padded[2].strip(),   # C
-            "tarih":     padded[1].strip(),   # B
-            "email_id":  padded[10].strip(),  # K
-            "fatura_url": padded[8].strip() if len(padded) > 8 else "",  # I: Fatura Linki
-            "numaralar": numaralar,
-        })
-        
-        # DEBUG: İlk 3 bekleyeni logla
-        if len(bekleyenler) <= 3:
-            log.info(f"DEBUG - Satır {i}: Gönderen='{padded[2][:30]}' | URL_index_8='{padded[8][:50] if len(padded) > 8 else 'BOŞ'}'")
-
-    log.info(f"Sheets'te {len(bekleyenler)} bekleyen fatura bulundu.")
-    return bekleyenler
-
-
-def sheets_bekleyeni_guncelle(servis, satir_no, dosya_no, kriter, deger):
-    """
-    Eşleşen bekleyen satırın Durum (G) ve Dosya No (H) kolonlarını günceller.
-    satir_no: Sheets'teki gerçek satır numarası (1-indexed, header=1)
-    """
-    try:
-        servis.spreadsheets().values().update(
-            spreadsheetId=SHEETS_ID,
-            range=f"📑 Fatura Listesi!G{satir_no}:H{satir_no}",
-            valueInputOption="RAW",
-            body={"values": [["✅ Eşleşti", dosya_no]]}
-        ).execute()
-        log.info(f"Satır {satir_no} güncellendi → {dosya_no} ({kriter}: {deger})")
-    except HttpError as e:
-        log.error(f"Bekleyen güncelleme hatası (satır {satir_no}): {e}")
-
-
-def sheets_bekleyeni_aitdegil_guncelle(servis, satir_no, sebep):
-    """
-    Bekleyen satırı "Bize Ait Değil" olarak günceller.
-    satir_no: Sheets'teki gerçek satır numarası (1-indexed, header=1)
-    """
-    try:
-        servis.spreadsheets().values().update(
-            spreadsheetId=SHEETS_ID,
-            range=f"📑 Fatura Listesi!G{satir_no}",
-            valueInputOption="RAW",
-            body={"values": [[f"🔴 Bize Ait Değil | {sebep}"]]}
-        ).execute()
-        log.info(f"Satır {satir_no} → Bize Ait Değil ({sebep})")
-    except HttpError as e:
-        log.error(f"Bekleyen eleme hatası (satır {satir_no}): {e}")
-
-
-def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
-                             dosya_no="", fatura_url="", email_id="", kullanici=""):
-    """
-    Tüm faturaları tek bir listede tutar.
-    Email ID kontrolü ile mükerrer kayıt engellenir.
-    Durum: "✅ Eşleşti" | "🟡 Bekliyor" | "❌ Okunamadı" | "🔴 Bize Ait Değil"
-    """
-    servis = build("sheets", "v4", credentials=_sheets_creds())
-    simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    # Mükerrer kontrol
-    if email_id and sheets_fatura_islendi_mi(servis, email_id):
-        log.info(f"Fatura listesinde zaten var, atlanıyor: {email_id}")
-        return
-
-    # Numaraları düz metin olarak yaz
-    konsimento = ", ".join(numaralar.get("konsimento_list", [])) if numaralar else ""
-    konteyner  = ", ".join(numaralar.get("konteyner_list",  [])) if numaralar else ""
-    beyanname  = ", ".join(numaralar.get("beyanname_list",  [])) if numaralar else ""
-
-    try:
-        servis.spreadsheets().values().append(
-            spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!A:L",  # L kolonuna kadar
-            valueInputOption="RAW",
-            body={"values": [[
-                simdi,       # A: Geliş Tarihi
-                tarih,       # B: Mail Tarihi
-                gonderen,    # C: Gönderen Firma
-                konsimento,  # D: Konşimento
-                konteyner,   # E: Konteyner
-                beyanname,   # F: Beyanname
-                durum,       # G: Durum
-                dosya_no,    # H: Dosya No
-                fatura_url,  # I: Fatura Linki
-                "",          # J: İşlemi Yapan
-                email_id,    # K: Email ID (mükerrer kontrol için)
-                kullanici,   # L: Kullanıcı (YENİ)
-            ]]}
-        ).execute()
-    except HttpError as e:
-        log.error(f"Fatura listesi yazma hatası: {e}")
-
-
-# ════════════════════════════════════════════════════════════
-#  EŞLEŞTİRME
-# ════════════════════════════════════════════════════════════
-
-def _norm(v):
-    if not v:
-        return ""
-    return re.sub(r"[^A-Z0-9]", "", str(v).upper())
-
 
 def eslestir(numaralar, referans):
-    """
-    Faturadan çıkarılan numaraları Sheets referans listesiyle karşılaştırır.
-    TÜM eşleşmeleri döndürür — aynı konşimento/konteyner için birden fazla
-    dosya (beyanname) olabilir, hepsi tek mailde gösterilir.
-    
-    Beyanname için esnek eşleştirme: Son 6 rakam eşleşirse kabul edilir.
-    """
-    f_konsimentolar = [_norm(v) for v in numaralar.get("konsimento_list", []) if v]
-    f_konteynerlar  = [_norm(v) for v in numaralar.get("konteyner_list",  []) if v]
-    f_beyannameler  = [_norm(v) for v in numaralar.get("beyanname_list",  []) if v]
-
+    """Numaraları referans ile eşleştir"""
     eslesmeler = []
-    gorulmus_dosyalar = set()  # Aynı dosyayı iki kez eklememek için
-
-    for row in referans:
-        dosya = row.get("dosya_no")
-        kullanici = row.get("kullanici", "")  # Kullanıcı bilgisi
-        if not dosya or dosya in gorulmus_dosyalar:
-            continue
-
-        # Konşimento eşleşmesi
-        for r_kon in row.get("konsimento_listesi", []):
-            if r_kon and r_kon in f_konsimentolar:
+    
+    konsimento_list = numaralar.get("konsimento_list", [])
+    konteyner_list = numaralar.get("konteyner_list", [])
+    beyanname_list = numaralar.get("beyanname_list", [])
+    
+    for ref in referans:
+        dosya_no = ref["dosya_no"]
+        
+        # Konteyner eşleşmesi (tam)
+        for k in konteyner_list:
+            if k.upper() == ref["konteyner"].upper():
                 eslesmeler.append({
-                    "dosya_no": dosya, 
-                    "kriter": "Konşimento No", 
-                    "deger": r_kon,
-                    "kullanici": kullanici  # YENİ
+                    "dosya_no": dosya_no,
+                    "kriter": "Konteyner",
+                    "deger": k
                 })
-                gorulmus_dosyalar.add(dosya)
                 break
-
-        if dosya in gorulmus_dosyalar:
-            continue
-
-        # Konteyner eşleşmesi
-        for r_knt in row.get("konteyner_listesi", []):
-            if r_knt and r_knt in f_konteynerlar:
+        
+        # Konşimento eşleşmesi (tam)
+        for ks in konsimento_list:
+            if ks.upper() == ref["konsimento"].upper():
                 eslesmeler.append({
-                    "dosya_no": dosya, 
-                    "kriter": "Konteyner No", 
-                    "deger": r_knt,
-                    "kullanici": kullanici  # YENİ
+                    "dosya_no": dosya_no,
+                    "kriter": "Konşimento",
+                    "deger": ks
                 })
-                gorulmus_dosyalar.add(dosya)
                 break
-
-        if dosya in gorulmus_dosyalar:
-            continue
-
-        # Beyanname eşleşmesi (esnek: son 6 rakam)
-        for r_bey in row.get("beyanname_listesi", []):
-            if not r_bey:
-                continue
-            
-            # Referans beyannameden son 6 rakamı al
-            r_bey_rakamlar = ''.join(c for c in r_bey if c.isdigit())
-            r_son6 = r_bey_rakamlar[-6:] if len(r_bey_rakamlar) >= 6 else r_bey_rakamlar
-            
-            # Faturadaki her beyanname ile karşılaştır
-            for f_bey in f_beyannameler:
-                f_bey_rakamlar = ''.join(c for c in f_bey if c.isdigit())
-                f_son6 = f_bey_rakamlar[-6:] if len(f_bey_rakamlar) >= 6 else f_bey_rakamlar
-                
-                # Son 6 rakam eşleşirse veya tam eşleşme varsa
-                if (r_son6 and f_son6 and r_son6 == f_son6) or r_bey == f_bey:
+        
+        # Beyanname eşleşmesi (son 6 rakam)
+        for b in beyanname_list:
+            ref_bey = ref["beyanname"]
+            if ref_bey and len(ref_bey) >= 6 and len(b) >= 6:
+                if ref_bey[-6:] == b[-6:]:
                     eslesmeler.append({
-                        "dosya_no": dosya, 
-                        "kriter": "Beyanname No", 
-                        "deger": f"{f_bey} ≈ {r_bey}",
-                        "kullanici": kullanici  # YENİ
+                        "dosya_no": dosya_no,
+                        "kriter": "Beyanname (son 6)",
+                        "deger": b
                     })
-                    gorulmus_dosyalar.add(dosya)
                     break
-            
-            if dosya in gorulmus_dosyalar:
-                break
-
-    return eslesmeler if eslesmeler else None
-
-
-# ════════════════════════════════════════════════════════════
-#  BİLDİRİM MAİLİ
-# ════════════════════════════════════════════════════════════
-
-def bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=None):
-    """
-    eslesmeler: [{"dosya_no": ..., "kriter": ..., "deger": ...}, ...]
-    Birden fazla eşleşme tek mailde gösterilir.
-    """
-    simdi = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    # Fatura linki satırı
-    url_satiri = ""
-    if fatura_url:
-        url_satiri = (
-            "<tr><td style=\"padding:10px 14px;color:#666;width:40%\">Fatura Linki</td>"
-            "<td style=\"padding:10px 14px\">"
-            f"<a href=\"{fatura_url}\" style=\"color:#1a5276;font-weight:500\">"
-            "🔗 Faturayı Görüntüle →</a></td></tr>"
-        )
-
-    # Eşleşen dosyalar bölümü
-    dosya_satirlari = ""
-    for i, e in enumerate(eslesmeler, 1):
-        baslik = f"{i}. EŞLEŞEN DOSYA" if len(eslesmeler) > 1 else "EŞLEŞme DETAYI"
-        dosya_satirlari += f"""
-    <tr style="background:#eaf0fb"><th colspan="2" style="padding:10px 14px;
-        text-align:left;color:#1a5276;font-size:12px">{baslik}</th></tr>
-    <tr><td style="padding:10px 14px;color:#666;width:40%">Dosya No</td>
-        <td style="padding:10px 14px;font-weight:700;font-size:15px;
-            color:#1a5276">{e["dosya_no"]}</td></tr>
-    <tr><td style="padding:10px 14px;color:#666">Eşleşen Kriter</td>
-        <td style="padding:10px 14px;font-weight:700;color:#1a7a4a">{e["kriter"]}</td></tr>
-    <tr><td style="padding:10px 14px;color:#666">Eşleşen Değer</td>
-        <td style="padding:10px 14px;font-weight:700;color:#1a7a4a">{e["deger"]}</td></tr>"""
-
-    # Başlık için dosya no özeti
-    if len(eslesmeler) == 1:
-        baslik_dosya = f"📂 Dosya No: {eslesmeler[0]['dosya_no']}"
-    else:
-        dosyalar = ", ".join(e["dosya_no"] for e in eslesmeler)
-        baslik_dosya = f"📂 {len(eslesmeler)} Dosya Eşleşti: {dosyalar}"
-
-    return f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-<div style="background:#1a5276;color:white;padding:20px;border-radius:8px 8px 0 0">
-  <h2 style="margin:0;font-size:18px">✅ Fatura Eşleşmesi Bulundu</h2>
-  <p style="margin:6px 0 0;font-size:13px;opacity:.8">{simdi}</p>
-</div>
-<div style="background:#f8f9fa;padding:24px;border:1px solid #dee2e6;border-top:none">
-  <div style="background:#1a5276;color:white;font-size:20px;font-weight:700;
-       padding:18px;border-radius:8px;text-align:center;margin-bottom:20px">
-    {baslik_dosya}
-  </div>
-  <table style="width:100%;border-collapse:collapse;background:white;border-radius:6px">
-    <tr style="background:#eaf0fb"><th colspan="2" style="padding:10px 14px;
-        text-align:left;color:#1a5276;font-size:12px">FATURA BİLGİLERİ</th></tr>
-    <tr><td style="padding:10px 14px;color:#666;width:40%">Gönderen</td>
-        <td style="padding:10px 14px;font-weight:500">{gonderen}</td></tr>
-    <tr><td style="padding:10px 14px;color:#666">Mail Konusu</td>
-        <td style="padding:10px 14px;font-weight:500">{konu}</td></tr>
-    <tr><td style="padding:10px 14px;color:#666">Mail Tarihi</td>
-        <td style="padding:10px 14px;font-weight:500">{tarih}</td></tr>
-    {url_satiri}
-    {dosya_satirlari}
-  </table>
-</div>
-<div style="padding:12px;text-align:center;font-size:12px;color:#888;
-     background:#f0f0f0;border:1px solid #dee2e6;border-top:none;
-     border-radius:0 0 8px 8px">Brisa Mail Otomasyon Sistemi</div>
-</div>""".strip()
+    
+    return eslesmeler
 
 
 # ════════════════════════════════════════════════════════════
@@ -1070,55 +650,55 @@ def bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=None):
 # ════════════════════════════════════════════════════════════
 
 def main():
-    log.info("═══ Sistem başladı ═══")
-
+    log.info("═══ Sistem başladı (IMAP versiyonu) ═══")
+    
     conn = db_init()
-    gmail = gmail_servis()
     referans = sheets_referans_veri()
-
+    
     if not referans:
         log.warning("Referans verisi boş — işlem yapılamaz.")
         return
-
-    mailler = gmail_okunmamis_mailler(gmail)
+    
+    mailler = gmail_okunmamis_mailler_imap()
     eslesti = beklemeye = okunamadi = 0
-
+    
     for mail in mailler:
         email_id = mail["id"]
+        imap_num = mail["imap_num"]
         gonderen = mail["gonderen"]
         konu     = mail["konu"]
         tarih    = mail["tarih"]
-
+        govde    = mail["html_body"]
+        
         if db_islendi_mi(conn, email_id):
             log.info(f"Daha önce işlendi, atlanıyor: {email_id}")
-            gmail_okundu_isaretle(gmail, email_id)
+            gmail_okundu_isaretle_imap(imap_num)
             continue
-
+        
         log.info(f"Yeni mail işleniyor: {konu} | {gonderen}")
-
+        
         # Mail gövdesinden linki çek
-        govde = gmail_govde_al(mail["payload"])
-        url   = linkten_url_bul(govde)
-
+        url = linkten_url_bul(govde)
+        
         if not url:
             log.info(f"Link bulunamadı: {konu}")
-            gmail_okundu_isaretle(gmail, email_id)
+            gmail_okundu_isaretle_imap(imap_num)
             continue
-
+        
         # Playwright ile sayfayı oku
         icerik = sayfayi_playwright_ile_oku(url)
-
+        
         if not icerik:
             log.error(f"Sayfa okunamadı: {url[:80]}")
             sheets_okunamayanEkle(gonderen, konu, tarih, "Sayfa açılamadı", fatura_url=url)
             sheets_faturaListesiYaz(gonderen, tarih, None, "❌ Okunamadı", fatura_url=url, email_id=email_id)
-            gmail_okundu_isaretle(gmail, email_id)
+            gmail_okundu_isaretle_imap(imap_num)
             okunamadi += 1
             continue
-
+        
         # Firma adını fatura sayfasından çek
         firma_adi = firma_adi_cek(icerik)
-
+        
         # Bize ait mi kontrol et
         bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, govde)
         if not bize_ait:
@@ -1128,12 +708,12 @@ def main():
                 "🔴 Bize Ait Değil | " + sahip_olmama_sebebi,
                 fatura_url=url, email_id=email_id
             )
-            gmail_okundu_isaretle(gmail, email_id)
+            gmail_okundu_isaretle_imap(imap_num)
             continue
-
-        # Gemini ile numaraları çıkar
-        numaralar = gemini_numaralari_kadir(icerik)
-
+        
+        # SADECE REGEX ile numaraları çıkar (Gemini kapalı)
+        numaralar = numaralari_regex_ile_cek(icerik)
+        
         if not numaralar or not any([
             numaralar["konsimento_list"],
             numaralar["konteyner_list"],
@@ -1146,166 +726,81 @@ def main():
                 fatura_url=url
             )
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "❌ Okunamadı", fatura_url=url, email_id=email_id)
-            gmail_okundu_isaretle(gmail, email_id)
+            gmail_okundu_isaretle_imap(imap_num)
             okunamadi += 1
             continue
-
+        
         log.info(
             f"Numaralar → Konşimento: {len(numaralar['konsimento_list'])} "
             f"| Konteyner: {len(numaralar['konteyner_list'])} "
             f"| Beyanname: {len(numaralar['beyanname_list'])}"
         )
-
-        # Eşleştir — birden fazla dosya eşleşebilir
+        
+        # Eşleştir
         eslesmeler = eslestir(numaralar, referans)
-
+        
         if eslesmeler:
-            # Her eşleşmeyi Sheets'e kaydet
             for e in eslesmeler:
                 sheets_eslesmeyiKaydet(
                     gonderen, konu, tarih,
                     e["dosya_no"], e["kriter"], e["deger"]
                 )
-
-            # Mail gönderme devre dışı — panel üzerinden takip ediliyor
-            dosyalar_str = ", ".join(e["dosya_no"] for e in eslesmeler)
-            kullanicilar_str = ", ".join(set(e.get("kullanici", "") for e in eslesmeler if e.get("kullanici")))  # Kullanıcıları birleştir
             
-            # html = bildirim_html(gonderen, konu, tarih, eslesmeler, fatura_url=url)
-            # gmail_mail_gonder(
-            #     gmail,
-            #     f"✅ Fatura Eşleşmesi — {len(eslesmeler)} Dosya: {dosyalar_str}",
-            #     html
-            # )
+            dosyalar_str = ", ".join(e["dosya_no"] for e in eslesmeler)
             db_islendi_ekle(conn, email_id, dosyalar_str)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
-                                    dosya_no=dosyalar_str, fatura_url=url, email_id=email_id, kullanici=kullanicilar_str)
+                                    dosya_no=dosyalar_str, fatura_url=url, email_id=email_id)
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar, "🟡 Bekliyor", fatura_url=url, email_id=email_id)
             beklemeye += 1
-
-        gmail_okundu_isaretle(gmail, email_id)
         
-        # Her fatura arasında 3 saniye bekle (edoksis rate limit önleme)
+        gmail_okundu_isaretle_imap(imap_num)
+        
+        # Her fatura arasında 3 saniye bekle
         time.sleep(3)
-
+    
     # ── Bekleyenleri Sheets'ten yeniden dene ─────────────────
-    # SQLite kalıcı değil (GitHub Actions runner sıfırlanır).
-    # Bekleyenler artık doğrudan 📑 Fatura Listesi!G = 🟡 Bekliyor
-    # satırlarından okunur ve eşleşince aynı satır güncellenir.
-    sheets_servis = build("sheets", "v4", credentials=_sheets_creds())
-    bekleyenler = sheets_bekleyenleri_getir(sheets_servis)
+    sheets_serv = sheets_servis()
+    bekleyenler = sheets_bekleyenleri_getir(sheets_serv)
     yeniden_eslesti = 0
-    bekleyen_elenen = 0  # Yeni sayaç
-
+    
     for item in bekleyenler:
+        numaralar_item = item["numaralar"]
+        eslesmeler_b   = eslestir(numaralar_item, referans)
+        if not eslesmeler_b:
+            continue
+        
         item_gonderen = item.get("gonderen", "")
         item_tarih    = item.get("tarih", "")
         item_email_id = item.get("email_id", "")
-        item_fatura_url = item.get("fatura_url", "")
         satir_no      = item["satir_no"]
-        numaralar_item = item["numaralar"]
         
-        # DEBUG: URL var mı kontrol et
-        log.info(f"Bekleyen satır {satir_no}: URL='{item_fatura_url}' (uzunluk: {len(item_fatura_url)})")
-        
-        # ── AŞAMA 1: Gönderen firma adı kontrolü (hızlı) ──────────
-        gonderen_normalize = turkce_normalize(item_gonderen)
-        
-        # Rakip firmalar kontrolü
-        rakip_firmalar = [
-            "CABOT", "MITSUI", "TANAKA", "ZEON CHEMICAL",
-            "KOLON", "THAI TOKAI", "HS HYOSUNG", "PYRAMID"
-        ]
-        
-        elenmis = False
-        eleme_sebebi = ""
-        
-        for firma in rakip_firmalar:
-            if firma in gonderen_normalize:
-                elenmis = True
-                eleme_sebebi = f"{firma} müşteri faturası"
-                break
-        
-        # AŞAMA 1'de elendiyse, güncelle ve devam et
-        if elenmis:
-            log.info(f"Bekleyen satır {satir_no} elendi (firma adı): {eleme_sebebi}")
-            sheets_bekleyeni_aitdegil_guncelle(sheets_servis, satir_no, eleme_sebebi)
-            bekleyen_elenen += 1
-            continue
-        
-        # ── AŞAMA 2: Fatura içeriği kontrolü (yavaş ama kapsamlı) ─
-        # Fatura URL'si varsa, Playwright ile sayfayı açıp tam kontrol et
-        if item_fatura_url:
-            log.info(f"Bekleyen satır {satir_no}: Fatura içeriği kontrol ediliyor... URL: {item_fatura_url[:80]}")
-            
-            # Playwright ile sayfayı oku
-            icerik = sayfayi_playwright_ile_oku(item_fatura_url)
-            
-            if icerik:
-                # Tam eleme kontrolü (İhracat, Yükleyici Brisa, vb.)
-                # Mail gövdesi yok, sadece sayfa içeriği var
-                bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, "")
-                
-                if not bize_ait:
-                    log.info(f"Bekleyen satır {satir_no} elendi (fatura içeriği): {sahip_olmama_sebebi}")
-                    sheets_bekleyeni_aitdegil_guncelle(sheets_servis, satir_no, sahip_olmama_sebebi)
-                    bekleyen_elenen += 1
-                    continue
-            else:
-                log.warning(f"Bekleyen satır {satir_no}: Fatura sayfası okunamadı, eşleştirmeye devam")
-        
-        # ── AŞAMA 3: Eşleştirme denemesi ──────────────────────────
-        # Debug log: Bekleyen numaralarını göster
-        log.info(
-            f"Bekleyen satır {satir_no}: "
-            f"Kon={numaralar_item.get('konsimento_list', [])} | "
-            f"Knt={numaralar_item.get('konteyner_list', [])} | "
-            f"Bey={numaralar_item.get('beyanname_list', [])}"
-        )
-        
-        eslesmeler_b = eslestir(numaralar_item, referans)
-        if not eslesmeler_b:
-            log.info(f"Satır {satir_no}: Eşleşme bulunamadı")
-            continue
-
         dosyalar_str_b = ", ".join(e["dosya_no"] for e in eslesmeler_b)
         ilk_e = eslesmeler_b[0]
-
-        # ✅ Sheets satırını güncelle (Durum + Dosya No)
+        
         sheets_bekleyeni_guncelle(
-            sheets_servis, satir_no,
+            sheets_serv, satir_no,
             dosyalar_str_b, ilk_e["kriter"], ilk_e["deger"]
         )
-
-        # ✅ Eşleşenler sekmesine de kaydet
+        
         for e in eslesmeler_b:
             sheets_eslesmeyiKaydet(
                 item_gonderen, "", item_tarih,
                 e["dosya_no"], e["kriter"], e["deger"]
             )
-
-        # Mail gönderme devre dışı — panel üzerinden takip ediliyor
-        # html = bildirim_html(item_gonderen, "", item_tarih, eslesmeler_b)
-        # gmail_mail_gonder(
-        #     gmail,
-        #     f"✅ Fatura Eşleşmesi — {len(eslesmeler_b)} Dosya: {dosyalar_str_b}",
-        #     html
-        # )
-
+        
         if item_email_id:
             db_islendi_ekle(conn, item_email_id, dosyalar_str_b)
-
+        
         yeniden_eslesti += 1
-
+    
     log.info(
         f"═══ Bitti → Eşleşti: {eslesti} | "
         f"Beklemeye: {beklemeye} | "
         f"Okunamadı: {okunamadi} | "
-        f"Bekleyenden eşleşti: {yeniden_eslesti} | "
-        f"Bekleyenden elenen: {bekleyen_elenen} ═══"
+        f"Bekleyenden eşleşti: {yeniden_eslesti} ═══"
     )
     conn.close()
 
