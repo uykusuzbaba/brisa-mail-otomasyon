@@ -1,6 +1,6 @@
 """
-Brisa Mail Otomasyon — IMAP Versiyonu (Token Sorunu Yok)
-Gmail IMAP ile mail okuma (OAuth token yenileme derdi olmadan)
+Brisa Mail Otomasyon — IMAP + Service Account (TOKEN YOK!)
+Gmail IMAP + Sheets Service Account = Sonsuza kadar çalışır
 """
 
 import base64
@@ -17,8 +17,7 @@ from email.header import decode_header
 from pathlib import Path
 
 import requests
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from playwright.sync_api import sync_playwright
@@ -33,9 +32,9 @@ log = logging.getLogger(__name__)
 
 # ── Ayarlar (GitHub Secrets'tan gelir) ───────────────────────
 GOOGLE_API_KEY       = os.environ["GOOGLE_API_KEY"]
-GMAIL_APP_PASSWORD   = os.environ["GMAIL_APP_PASSWORD"]       # IMAP şifresi (yeni)
-GMAIL_EMAIL          = os.environ.get("GMAIL_EMAIL", "murat.dagli@dlklogistics.com")
-SHEETS_CREDENTIALS   = os.environ.get("SHEETS_CREDENTIALS", "")  # Sheets için OAuth (ayrı)
+GMAIL_APP_PASSWORD   = os.environ["GMAIL_APP_PASSWORD"]       # IMAP şifresi
+GMAIL_EMAIL          = os.environ.get("GMAIL_EMAIL", "ramsesium.md@gmail.com")
+SERVICE_ACCOUNT_JSON = os.environ["SERVICE_ACCOUNT_JSON"]     # Sheets için (TOKEN YOK!)
 SHEETS_ID            = os.environ["SHEETS_ID"]
 BILDIRIM_ALICISI     = os.environ["BILDIRIM_ALICISI"]
 GONDEREN_LISTESI     = os.environ.get("GONDEREN_LISTESI", "m.hizmet@brisa.com.tr").split(",")
@@ -43,11 +42,6 @@ SORGU_PENCERESI_GUN  = int(os.environ.get("SORGU_PENCERESI_GUN", "60"))
 
 # ── Sabitler ─────────────────────────────────────────────────
 DB_PATH = Path("brisa_mail.db")
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash:generateContent?key=" + GOOGLE_API_KEY
-)
-
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
@@ -643,7 +637,7 @@ def eslestir(numaralar, referans):
 # ════════════════════════════════════════════════════════════
 
 def main():
-    log.info("═══ Sistem başladı (IMAP versiyonu) ═══")
+    log.info("═══ Sistem başladı (IMAP + Service Account) ═══")
     
     conn = db_init()
     referans = sheets_referans_veri()
