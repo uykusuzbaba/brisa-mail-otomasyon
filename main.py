@@ -475,20 +475,19 @@ def sayfayi_playwright_ile_oku(url):
 
 def linkten_url_bul(html_govde):
     """Mail içinden edoksis linkini çıkar"""
-    # DEBUG: Mail içeriğini göster
-    log.info(f"📧 Mail HTML uzunluğu: {len(html_govde)} karakter")
-    log.info(f"📧 İlk 500 karakter: {html_govde[:500]}")
+    # Tüm edoksis subdomain'lerini yakala
+    # earsiventegrasyon.edoksis.net, edoksis.com, vs.
+    match = re.search(
+        r'https?://[a-zA-Z0-9\-\.]*edoksis\.[a-z]+/[^\s"<>]+', 
+        html_govde, 
+        re.IGNORECASE
+    )
     
-    match = re.search(r'https://edoksis\.com/[^\s"<>]+', html_govde, re.IGNORECASE)
-    
-    if not match:
-        # Alternatif linkler dene
-        match = re.search(r'https?://[^\s"<>]*edoksis[^\s"<>]+', html_govde, re.IGNORECASE)
-        if match:
-            log.info(f"🔍 Alternatif link bulundu: {match.group(0)}")
+    if match:
+        log.info(f"🔗 Link bulundu: {match.group(0)[:80]}...")
     
     return match.group(0) if match else None
-
+    
 def firma_adi_cek(icerik):
     """Fatura sayfasından firma adını regex ile çek"""
     patterns = [
