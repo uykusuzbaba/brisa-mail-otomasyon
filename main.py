@@ -650,6 +650,17 @@ def numaralari_regex_ile_cek(metin):
             if len(kod.strip()) >= 6:
                 konsimentolar.append(kod.strip())
 
+    # DHL tipi fatura — 3 varyasyon:
+    # A) Boşluksuz birleşik tablo: "22/04/20269782128510TKU..." (tarih+AWB yapışık)
+    for m in re.finditer(r'\d{2}/\d{2}/\d{4}(\d{10})(?=\D)', mu):
+        konsimentolar.append(m.group(1))
+    # B) Tab/boşluk ayrık tablo: "22/04/2026\t1291072031\tKSF"
+    for m in re.finditer(r'\d{2}/\d{2}/\d{4}[\t ]+(\d{10})(?!\d)', mu):
+        konsimentolar.append(m.group(1))
+    # C) AWB/HIZMET başlığı hemen ardından: "AWB/HIZMET  9782123761  KSF"
+    for m in re.finditer(r'AWB[/\s]*H[II]ZMET[\t ]+(\d{10})(?!\d)', mu):
+        konsimentolar.append(m.group(1))
+
     konsimentolar = list(set(konsimentolar))
 
     sonuc = {
