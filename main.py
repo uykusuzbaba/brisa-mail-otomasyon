@@ -66,7 +66,7 @@ RAKIP_FIRMALAR = [
     # v24'te eklenen firmalar
     "SOUTHLAND",          # SOUTHLAND KATI COTE D'IVOIRE (SKCI) ve SOUTHLAND RUBBER CO.
     "SKCI",               # SOUTHLAND KATI kısa adı
-    "GT RUBBER",          # G T RUBBER CO.,LTD
+    "G T RUBBER",         # G T RUBBER CO.,LTD
     "IOI ACIDCHEM",       # IOI ACIDCHEM SDN. BHD.
     "RHODIA",             # RHODIA OPERATIONS
     "SAPH",               # SOCIETE AFRICAINE DE PLANTATIONS D'HEVEAS (her iki yazımı kapsar)
