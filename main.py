@@ -390,6 +390,74 @@ def sheets_bekleyenleri_getir(servis):
     return bekleyenler
 
 
+def sheets_okunamayanlari_getir(servis):
+    """
+    ❌ Okunamadı satırlarını oku — fatura_url varsa yeniden denenecek.
+    """
+    for deneme in range(3):
+        try:
+            result = servis.spreadsheets().values().get(
+                spreadsheetId=SHEETS_ID,
+                range="📑 Fatura Listesi!A:L"
+            ).execute()
+            break
+        except HttpError as e:
+            if e.resp.status in [503, 429]:
+                bekleme = 5 * (deneme + 1)
+                log.warning(f"Okunamayan okuma geçici hata — {bekleme}s ({deneme+1}/3)")
+                if deneme < 2:
+                    time.sleep(bekleme)
+                    continue
+            log.error(f"Okunamayan okuma hatası: {e}")
+            return []
+    else:
+        return []
+
+    rows = result.get("values", [])
+    if len(rows) < 2:
+        return []
+
+    okunamayanlar = []
+    for i, row in enumerate(rows[1:], start=2):
+        padded = row + [""] * (12 - len(row))
+        durum_hucre = padded[6].strip()
+
+        if "Okunamadı" not in durum_hucre and "❌" not in durum_hucre:
+            continue
+
+        fatura_url = padded[8].strip()
+        if not fatura_url:
+            continue  # URL yoksa zaten açamayız
+
+        okunamayanlar.append({
+            "satir_no":   i,
+            "gonderen":   padded[2].strip(),
+            "tarih":      padded[1].strip(),
+            "email_id":   padded[10].strip(),
+            "fatura_url": fatura_url,
+        })
+
+    log.info(f"❌ {len(okunamayanlar)} okunamayan fatura yeniden denenecek")
+    return okunamayanlar
+
+
+def sheets_okunamayani_guncelle(servis, satir_no, numaralar, durum, dosya_no=""):
+    """Okunamayan satırın D-H kolonlarını günceller."""
+    try:
+        konsimento = ", ".join(numaralar.get("konsimento_list", [])) if numaralar else ""
+        konteyner  = ", ".join(numaralar.get("konteyner_list",  [])) if numaralar else ""
+        beyanname  = ", ".join(numaralar.get("beyanname_list",  [])) if numaralar else ""
+        servis.spreadsheets().values().update(
+            spreadsheetId=SHEETS_ID,
+            range=f"📑 Fatura Listesi!D{satir_no}:H{satir_no}",
+            valueInputOption="RAW",
+            body={"values": [[konsimento, konteyner, beyanname, durum, dosya_no]]}
+        ).execute()
+        log.info(f"Okunamayan satır {satir_no} güncellendi → {durum}")
+    except HttpError as e:
+        log.error(f"Okunamayan güncelleme hatası (satır {satir_no}): {e}")
+
+
 def sheets_bekleyeni_guncelle(servis, satir_no, dosya_no, kriter, deger):
     try:
         servis.spreadsheets().values().update(
@@ -915,6 +983,63 @@ def main():
         f"Bekleyenden eşleşti: {yeniden_eslesti} | "
         f"Bekleyenden elenen: {bekleyen_elenen} ═══"
     )
+
+    # ── Okunamayanları yeniden dene ───────────────────────────
+    okunamayanlar = sheets_okunamayanlari_getir(servis)
+    okunamayan_eslesti = 0
+    okunamayan_bekleyen = 0
+
+    for item in okunamayanlar:
+        satir_no        = item["satir_no"]
+        item_fatura_url = item["fatura_url"]
+        item_email_id   = item.get("email_id", "")
+
+        log.info(f"Okunamayan satır {satir_no} yeniden deneniyor...")
+        icerik = sayfayi_playwright_ile_oku(item_fatura_url)
+
+        if not icerik:
+            log.info(f"Satır {satir_no}: Link expire veya hâlâ okunamıyor, atlanıyor")
+            continue  # Durum değiştirilmiyor, ❌ Okunamadı olarak kalır
+
+        # Bize ait mi kontrolü
+        bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, "")
+        if not bize_ait:
+            log.info(f"Okunamayan satır {satir_no} elendi: {sahip_olmama_sebebi}")
+            sheets_okunamayani_guncelle(servis, satir_no, None,
+                                        f"🔴 Bize Ait Değil | {sahip_olmama_sebebi}")
+            continue
+
+        # Numara çıkar
+        numaralar = numaralari_regex_ile_cek(icerik)
+        if not numaralar:
+            log.info(f"Satır {satir_no}: Sayfa okundu ama numara hâlâ bulunamadı")
+            continue  # ❌ Okunamadı olarak kalır
+
+        # Eşleştir
+        eslesmeler = eslestir(numaralar, referans)
+        if eslesmeler:
+            dosyalar_str = ", ".join(e["dosya_no"] for e in eslesmeler)
+            kullanicilar_str = ", ".join(
+                set(e.get("kullanici", "") for e in eslesmeler if e.get("kullanici"))
+            )
+            sheets_okunamayani_guncelle(servis, satir_no, numaralar,
+                                        "✅ Eşleşti", dosyalar_str)
+            if item_email_id:
+                db_islendi_ekle(conn, item_email_id, dosyalar_str)
+            okunamayan_eslesti += 1
+        else:
+            # Numara var ama eşleşme yok → Bekleyene al
+            sheets_okunamayani_guncelle(servis, satir_no, numaralar, "🟡 Bekliyor")
+            okunamayan_bekleyen += 1
+
+        time.sleep(3)
+
+    if okunamayanlar:
+        log.info(
+            f"═══ Okunamayanlar → Eşleşti: {okunamayan_eslesti} | "
+            f"Bekleyene alındı: {okunamayan_bekleyen} ═══"
+        )
+
     conn.close()
 
 
