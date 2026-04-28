@@ -1,23 +1,22 @@
 """
-Brisa Mail Otomasyon — v24 FINAL
+Brisa Mail Otomasyon — v28 (v24 + Çapraz Eleme İptal)
 Gmail IMAP (App Password) + Sheets Service Account = Sonsuz token
 
-Tüm özellikler dahil:
+v28 Değişikliği:
+  - Çapraz eleme mekanizması KALDIRILDI (v24'e geri dönüldü)
+  
+v24 Özellikleri:
   - Türkçe karakter normalizasyonu
-  - Rakip firma listesi (CABOT, MITSUI + SOUTHLAND/GTR/IOI/RHODIA/SAPH vb.)
+  - Rakip firma listesi
   - Yükleyici/Gönderici Brisa kontrolü
   - Virgüllü konşimento parse + House AWB/HAWB
   - _norm() ile eşleştirme normalizasyonu
   - Mükerrer kayıt kontrolü (Sheets K kolonu)
-  - page.inner_text("body") — düz metin (HTML değil)
-  - Bekleyenler için 3 aşamalı eleme
+  - page.inner_text("body")
+  - Bekleyenler için 3 aşamalı eleme (firma + içerik + eşleştirme)
   - sheets_bekleyeni_aitdegil_guncelle()
   - Kullanıcı (L kolonu) bilgisi
   - Sheets retry mekanizması (503/429)
-  - fatura_url bekleyenlerden taşınıyor
-  - YENİ v24: Bize ait değil çapraz eleme
-    (Ait değil faturanın konşimento/konteyner/beyanname numarası
-     bekleyen faturalarda da geçiyorsa → otomatik ait değil yap)
 """
 
 import email
@@ -484,84 +483,7 @@ def sheets_bekleyeni_aitdegil_guncelle(servis, satir_no, sebep):
         log.error(f"Bekleyen eleme hatası (satır {satir_no}): {e}")
 
 
-def sheets_ait_degil_numaralari_getir(servis):
-    """
-    Fatura Listesi'nden 'Bize Ait Değil' satırlarının konşimento,
-    konteyner ve beyanname numaralarını okur.
-    Bekleyenleri çapraz eleme için kullanılır.
-    Döndürür: {
-        "konsimento": {norm_no, norm_no, ...},
-        "konteyner":  {norm_no, ...},
-        "beyanname":  {son6_rakam, ...}
-    }
-    """
-    try:
-        result = servis.spreadsheets().values().get(
-            spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!A:L"
-        ).execute()
-    except HttpError as e:
-        log.error(f"Ait değil numaraları okuma hatası: {e}")
-        return {"konsimento": set(), "konteyner": set(), "beyanname": set()}
-
-    rows = result.get("values", [])
-    ait_degil = {"konsimento": set(), "konteyner": set(), "beyanname": set()}
-
-    for row in rows[1:]:
-        padded = row + [""] * (12 - len(row))
-        durum = padded[6].strip()
-        if "Bize Ait Değil" not in durum and "🔴" not in durum:
-            continue
-
-        # Konşimento (D kolonu)
-        for k in padded[3].split(","):
-            k = k.strip()
-            if k:
-                ait_degil["konsimento"].add(_norm(k))
-
-        # Konteyner (E kolonu)
-        for k in padded[4].split(","):
-            k = k.strip()
-            if k:
-                ait_degil["konteyner"].add(_norm(k))
-
-        # Beyanname (F kolonu) — son 6 rakam
-        for b in padded[5].split(","):
-            b = b.strip()
-            if b:
-                son6 = ''.join(c for c in b if c.isdigit())[-6:]
-                if son6:
-                    ait_degil["beyanname"].add(son6)
-
-    log.info(
-        f"🔴 Ait değil havuzu: "
-        f"Konşimento={len(ait_degil['konsimento'])} "
-        f"Konteyner={len(ait_degil['konteyner'])} "
-        f"Beyanname={len(ait_degil['beyanname'])}"
-    )
-    return ait_degil
-
-
-def capraz_eleme_kontrol(numaralar, ait_degil_havuzu):
-    """
-    Bekleyen faturanın numaralarını, daha önce 'Bize Ait Değil' olarak
-    işaretlenmiş faturaların numara havuzuyla karşılaştırır.
-    Eşleşme varsa (False, sebep) döner.
-    """
-    for k in numaralar.get("konsimento_list", []):
-        if k and _norm(k) in ait_degil_havuzu["konsimento"]:
-            return False, f"Konşimento çapraz eşleşme: {k}"
-
-    for k in numaralar.get("konteyner_list", []):
-        if k and _norm(k) in ait_degil_havuzu["konteyner"]:
-            return False, f"Konteyner çapraz eşleşme: {k}"
-
-    for b in numaralar.get("beyanname_list", []):
-        son6 = ''.join(c for c in b if c.isdigit())[-6:]
-        if son6 and son6 in ait_degil_havuzu["beyanname"]:
-            return False, f"Beyanname çapraz eşleşme: {b}"
-
-    return True, ""
+# v28: Çapraz eleme fonksiyonları kaldırıldı
 
 
 # ════════════════════════════════════════════════════════════
@@ -897,12 +819,11 @@ def main():
         gmail_okundu_isaretle_imap(imap_num)
         time.sleep(3)
 
-    # ── Bekleyenleri yeniden dene — 3 Aşamalı + Çapraz Eleme ────
+    # ── Bekleyenleri yeniden dene — 3 Aşamalı ────
     servis = sheets_servis()
     bekleyenler = sheets_bekleyenleri_getir(servis)
 
-    # YENİ v24: Ait değil numara havuzunu bir kere oku (tüm bekleyenler için kullan)
-    ait_degil_havuzu = sheets_ait_degil_numaralari_getir(servis)
+    # v28: Çapraz eleme kaldırıldı
 
     yeniden_eslesti = 0
     bekleyen_elenen = 0
@@ -914,14 +835,6 @@ def main():
         item_fatura_url = item.get("fatura_url", "")
         satir_no        = item["satir_no"]
         numaralar_item  = item["numaralar"]
-
-        # AŞAMA 0 (YENİ v24): Çapraz eleme — numaralar ait değil havuzunda mı?
-        capraz_gecti, capraz_sebep = capraz_eleme_kontrol(numaralar_item, ait_degil_havuzu)
-        if not capraz_gecti:
-            log.info(f"Bekleyen satır {satir_no} çapraz eleme ile elendi: {capraz_sebep}")
-            sheets_bekleyeni_aitdegil_guncelle(servis, satir_no, capraz_sebep)
-            bekleyen_elenen += 1
-            continue
 
         # AŞAMA 1: Gönderen firma adından hızlı eleme
         gonderen_norm = turkce_normalize(item_gonderen)
