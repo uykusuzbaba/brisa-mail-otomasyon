@@ -1,16 +1,13 @@
 """
-Brisa Mail Otomasyon — v27 LABEL + TIMEOUT + YENİ FİRMALAR + LİMAN KONTROLÜ
+Brisa Mail Otomasyon — v27 INBOX + TIMEOUT + YENİ FİRMALAR + LİMAN
 Gmail IMAP (App Password) + Sheets Service Account = Sonsuz token
 
 v27 değişiklikleri:
+  - SADECE INBOX kullanır (label YOK)
   - Yeni rakip firmalar: ZHEJIANG HAILIDE, KAMIN, BIRLA CARBON
   - Liman kontrolü: SAN PEDRO, ABIDJAN (POL)
-  - Gmail label: "brisa-tedarikci-faturalari"
   - YÜKLEYICI MANTIK DÜZELTMESİ: SHIPPER = Brisa ise → İHRACAT → BİZE AİT DEĞİL
-  
-v26 özellikleri:
-  - Gmail LABEL bazlı arama (inbox yerine)
-  - Label yoksa otomatik inbox'a döner
+  - Sheets API AuthorizedHttp fix
   
 v25 özellikleri:
   - httplib2 timeout ayarları (60s)
@@ -65,7 +62,6 @@ log = logging.getLogger(__name__)
 GOOGLE_API_KEY       = os.environ.get("GOOGLE_API_KEY", "")
 GMAIL_APP_PASSWORD   = os.environ["GMAIL_APP_PASSWORD"]
 GMAIL_EMAIL          = os.environ.get("GMAIL_EMAIL", "ramsesium.md@gmail.com")
-GMAIL_LABEL          = os.environ.get("GMAIL_LABEL", "Brisa Tedarikçi Faturaları")  # Gmail etiket adı
 SERVICE_ACCOUNT_JSON = os.environ["SERVICE_ACCOUNT_JSON"]
 SHEETS_ID            = os.environ["SHEETS_ID"]
 BILDIRIM_ALICISI     = os.environ["BILDIRIM_ALICISI"]
@@ -88,7 +84,7 @@ RAKIP_FIRMALAR = [
     # v24'te eklenen firmalar
     "SOUTHLAND",          # SOUTHLAND KATI COTE D'IVOIRE (SKCI) ve SOUTHLAND RUBBER CO.
     "SKCI",               # SOUTHLAND KATI kısa adı
-    "GT RUBBER",          # G T RUBBER CO.,LTD
+    "G T RUBBER",         # G T RUBBER CO.,LTD
     "IOI ACIDCHEM",       # IOI ACIDCHEM SDN. BHD.
     "RHODIA",             # RHODIA OPERATIONS
     "SAPH",               # SOCIETE AFRICAINE DE PLANTATIONS D'HEVEAS (her iki yazımı kapsar)
@@ -178,27 +174,10 @@ def gmail_imap_baglanti():
 def gmail_okunmamis_mailler_imap():
     """
     IMAP ile okunmamış Brisa maillerini çek
-    ✅ v27: Label bazlı arama (inbox yerine)
+    ✅ Sadece inbox kullanır (label YOK)
     """
     mail = gmail_imap_baglanti()
-    
-    # Label'ı seç (Türkçe karakter ve boşluk içerebilir)
-    # IMAP'te slash (/) → dot (.) olur, ama bizim label'da slash yok
-    label_imap = GMAIL_LABEL
-    
-    try:
-        # Label'ı seç (tırnak içinde)
-        status, response = mail.select(f'"{label_imap}"')
-        if status == "OK":
-            log.info(f"✅ Label seçildi: {label_imap}")
-        else:
-            # Başarısız olursa inbox'a dön
-            log.warning(f"⚠️ Label '{label_imap}' seçilemedi, inbox kullanılıyor")
-            mail.select("inbox")
-    except Exception as e:
-        log.warning(f"⚠️ Label seçme hatası: {e}, inbox kullanılıyor")
-        mail.select("inbox")
-    
+    mail.select("inbox")
     detaylar = []
 
     for gonderen in GONDEREN_LISTESI:
@@ -208,7 +187,7 @@ def gmail_okunmamis_mailler_imap():
                 continue
 
             msg_nums = messages[0].split()
-            log.info(f"📬 {gonderen} → {len(msg_nums)} okunmamış mail (label: {label_imap})")
+            log.info(f"📬 {gonderen} → {len(msg_nums)} okunmamış mail")
 
             for num in msg_nums:
                 try:
@@ -289,19 +268,23 @@ def _sheets_creds():
 def sheets_servis():
     """
     ✅ v27: httplib2 timeout + socket timeout ayarları (DÜZELTİLDİ)
-    Authorized HTTP kullanarak timeout koruması
+    google-auth-httplib2.AuthorizedHttp kullanarak
     """
+    from google_auth_httplib2 import AuthorizedHttp
+    
     # Socket seviyesi timeout
     socket.setdefaulttimeout(SOCKET_TIMEOUT)
     
     # Credentials oluştur
     creds = _sheets_creds()
     
-    # HTTP client timeout ile oluştur ve authorize et
+    # HTTP client timeout ile oluştur
     http = httplib2.Http(timeout=HTTP_TIMEOUT)
-    authorized_http = creds.authorize(http)
     
-    # Sadece authorized http kullan (credentials değil)
+    # AuthorizedHttp kullan
+    authorized_http = AuthorizedHttp(creds, http=http)
+    
+    # Sadece authorized http kullan
     return build("sheets", "v4", http=authorized_http)
 
 
@@ -1025,7 +1008,7 @@ def bekleyenleri_kontrol_et(conn, referanslar):
 # ════════════════════════════════════════════════════════════
 
 def main():
-    log.info("═══ Sistem başladı (IMAP + Service Account) v27 — YENİ FİRMALAR + LİMAN + LABEL ═══")
+    log.info("═══ Sistem başladı (IMAP + Service Account) v27 — INBOX ONLY ═══")
     
     try:
         # Socket timeout ayarla
