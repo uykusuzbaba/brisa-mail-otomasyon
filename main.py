@@ -1,5 +1,5 @@
 """
-Brisa Mail Otomasyon — v27 INBOX + TIMEOUT + YENİ FİRMALAR + LİMAN
+Brisa Mail Otomasyon — v27 INBOX + TIMEOUT + YENİ FİRMALAR + LİMAN + PLAYWRIGHT FIX
 Gmail IMAP (App Password) + Sheets Service Account = Sonsuz token
 
 v27 değişiklikleri:
@@ -8,6 +8,7 @@ v27 değişiklikleri:
   - Liman kontrolü: SAN PEDRO, ABIDJAN (POL)
   - YÜKLEYICI MANTIK DÜZELTMESİ: SHIPPER = Brisa ise → İHRACAT → BİZE AİT DEĞİL
   - Sheets API AuthorizedHttp fix
+  - PLAYWRIGHT FIX: --no-sandbox (GitHub Actions uyumlu)
   
 v25 özellikleri:
   - httplib2 timeout ayarları (60s)
@@ -538,23 +539,29 @@ def edoksis_link_mi(url):
 def edoksis_icerik_cek(url):
     """
     Playwright ile edoksis linkini render et
+    GitHub Actions uyumlu (--no-sandbox)
     page.inner_text("body") → düz metin (HTML tag'leri olmadan)
     """
+    log.info(f"🌐 Playwright ile sayfa açılıyor: {url[:80]}...")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]  # GitHub Actions fix
+            )
             page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3)  # Rate limit önleme
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)  # Rate limit önleme
             
             # HTML yerine düz metin
             metin = page.inner_text("body")
             
             browser.close()
-            return metin
+            log.info(f"✅ Sayfa okundu: {len(metin)} karakter")
+            return metin[:15000]  # İlk 15K karakter (performans)
     except Exception as e:
-        log.error(f"edoksis render hatası: {e}")
-        return ""
+        log.error(f"❌ Playwright hatası: {e}")
+        return None
 
 
 def rakip_firma_mi(metin):
