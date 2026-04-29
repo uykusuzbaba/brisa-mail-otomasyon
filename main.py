@@ -65,7 +65,7 @@ log = logging.getLogger(__name__)
 GOOGLE_API_KEY       = os.environ.get("GOOGLE_API_KEY", "")
 GMAIL_APP_PASSWORD   = os.environ["GMAIL_APP_PASSWORD"]
 GMAIL_EMAIL          = os.environ.get("GMAIL_EMAIL", "ramsesium.md@gmail.com")
-GMAIL_LABEL          = os.environ.get("GMAIL_LABEL", "brisa-tedarikci-faturalari")  # Gmail etiket adı
+GMAIL_LABEL          = os.environ.get("GMAIL_LABEL", "Brisa Tedarikçi Faturaları")  # Gmail etiket adı
 SERVICE_ACCOUNT_JSON = os.environ["SERVICE_ACCOUNT_JSON"]
 SHEETS_ID            = os.environ["SHEETS_ID"]
 BILDIRIM_ALICISI     = os.environ["BILDIRIM_ALICISI"]
@@ -88,7 +88,7 @@ RAKIP_FIRMALAR = [
     # v24'te eklenen firmalar
     "SOUTHLAND",          # SOUTHLAND KATI COTE D'IVOIRE (SKCI) ve SOUTHLAND RUBBER CO.
     "SKCI",               # SOUTHLAND KATI kısa adı
-    "G T RUBBER",         # G T RUBBER CO.,LTD
+    "GT RUBBER",          # G T RUBBER CO.,LTD
     "IOI ACIDCHEM",       # IOI ACIDCHEM SDN. BHD.
     "RHODIA",             # RHODIA OPERATIONS
     "SAPH",               # SOCIETE AFRICAINE DE PLANTATIONS D'HEVEAS (her iki yazımı kapsar)
@@ -178,19 +178,22 @@ def gmail_imap_baglanti():
 def gmail_okunmamis_mailler_imap():
     """
     IMAP ile okunmamış Brisa maillerini çek
-    ✅ v26: Label bazlı arama (inbox yerine)
+    ✅ v27: Label bazlı arama (inbox yerine)
     """
     mail = gmail_imap_baglanti()
     
-    # Label'ı seç (Gmail'de "Brisa/Fatura" → IMAP'te "Brisa.Fatura" olarak görünür)
-    label_imap = GMAIL_LABEL.replace("/", ".")
+    # Label'ı seç (Türkçe karakter ve boşluk içerebilir)
+    # IMAP'te slash (/) → dot (.) olur, ama bizim label'da slash yok
+    label_imap = GMAIL_LABEL
     
     try:
-        # Önce label'ı seç
-        status, _ = mail.select(f'"{label_imap}"')
-        if status != "OK":
-            # Label yoksa inbox'a dön
-            log.warning(f"⚠️ Label '{label_imap}' bulunamadı, inbox kullanılıyor")
+        # Label'ı seç (tırnak içinde)
+        status, response = mail.select(f'"{label_imap}"')
+        if status == "OK":
+            log.info(f"✅ Label seçildi: {label_imap}")
+        else:
+            # Başarısız olursa inbox'a dön
+            log.warning(f"⚠️ Label '{label_imap}' seçilemedi, inbox kullanılıyor")
             mail.select("inbox")
     except Exception as e:
         log.warning(f"⚠️ Label seçme hatası: {e}, inbox kullanılıyor")
@@ -285,16 +288,21 @@ def _sheets_creds():
 
 def sheets_servis():
     """
-    ✅ v25: httplib2 timeout + socket timeout ayarları
+    ✅ v27: httplib2 timeout + socket timeout ayarları (DÜZELTİLDİ)
+    Authorized HTTP kullanarak timeout koruması
     """
     # Socket seviyesi timeout
     socket.setdefaulttimeout(SOCKET_TIMEOUT)
     
-    # HTTP client timeout
-    http = httplib2.Http(timeout=HTTP_TIMEOUT)
-    
+    # Credentials oluştur
     creds = _sheets_creds()
-    return build("sheets", "v4", credentials=creds, http=http)
+    
+    # HTTP client timeout ile oluştur ve authorize et
+    http = httplib2.Http(timeout=HTTP_TIMEOUT)
+    authorized_http = creds.authorize(http)
+    
+    # Sadece authorized http kullan (credentials değil)
+    return build("sheets", "v4", http=authorized_http)
 
 
 def _sheets_retry_wrapper(func, *args, **kwargs):
