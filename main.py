@@ -80,7 +80,8 @@ RAKIP_FIRMALAR = [
     "HAILIDE",            # Kısa adı
     "KAMIN",              # KAMIN
     "BIRLA CARBON",       # BIRLA CARBON EGYPT S.AE
-    "UNIMAC ",            # UNIMAC RUBBER CO.,LTD.  
+    "UNIMAC",             # UNIMAC RUBBER CO.,LTD.
+    "LANXESS",            # LANXESS BELGIUM NV
 ]
 
 # Eleme limanları (POL = Port of Loading)
