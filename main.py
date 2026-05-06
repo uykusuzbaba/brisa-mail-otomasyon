@@ -82,6 +82,7 @@ RAKIP_FIRMALAR = [
     "BIRLA CARBON",       # BIRLA CARBON EGYPT S.AE
     "UNIMAC",             # UNIMAC RUBBER CO.,LTD.
     "LANXESS",            # LANXESS BELGIUM NV
+    "ATOMEX",             # ATOMEX SIA
 ]
 
 # Eleme limanları (POL = Port of Loading)
