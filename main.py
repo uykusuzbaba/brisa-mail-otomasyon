@@ -85,6 +85,7 @@ RAKIP_FIRMALAR = [
     "ATOMEX",             # ATOMEX SIA
     "NIPPON SERIO",       # NIPPON SEIRO CO., LTD
     "ORION ENGINEERED",   # ORION ENGINEERED CARBONS GMBH
+    "INABATA",            # INABATA & CO., LTD.
 ]
 
 # Eleme limanları (POL = Port of Loading)
