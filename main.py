@@ -84,6 +84,7 @@ RAKIP_FIRMALAR = [
     "LANXESS",            # LANXESS BELGIUM NV
     "ATOMEX",             # ATOMEX SIA
     "NIPPON SERIO",       # NIPPON SEIRO CO., LTD
+    "ORION ENGINEERED",   # ORION ENGINEERED CARBONS GMBH
 ]
 
 # Eleme limanları (POL = Port of Loading)
