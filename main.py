@@ -86,6 +86,7 @@ RAKIP_FIRMALAR = [
     "NIPPON SEIRO",       # NIPPON SEIRO CO., LTD
     "ORION ENGINEERED",   # ORION ENGINEERED CARBONS GMBH
     "INABATA",            # INABATA & CO., LTD.
+    "SHANDONG DEREK",     # SHANDONG DEREK NEW MATERIALS CO.,LTD.
 ]
 
 # Eleme limanları (POL = Port of Loading)
