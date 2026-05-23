@@ -83,7 +83,7 @@ RAKIP_FIRMALAR = [
     "UNIMAC",             # UNIMAC RUBBER CO.,LTD.
     "LANXESS",            # LANXESS BELGIUM NV
     "ATOMEX",             # ATOMEX SIA
-    "NIPPON SERIO",       # NIPPON SEIRO CO., LTD
+    "NIPPON SEIRO",       # NIPPON SEIRO CO., LTD
     "ORION ENGINEERED",   # ORION ENGINEERED CARBONS GMBH
     "INABATA",            # INABATA & CO., LTD.
 ]
