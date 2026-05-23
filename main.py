@@ -87,6 +87,7 @@ RAKIP_FIRMALAR = [
     "ORION ENGINEERED",   # ORION ENGINEERED CARBONS GMBH
     "INABATA",            # INABATA & CO., LTD.
     "SHANDONG DEREK",     # SHANDONG DEREK NEW MATERIALS CO.,LTD.
+    "FORMOSA",            # FORMOSA TAFFETA CO., LTD.
 ]
 
 # Eleme limanları (POL = Port of Loading)
