@@ -1,8 +1,13 @@
 """
-Brisa Mail Otomasyon — v29 (v28 + Güncel Eklemeler)
+Brisa Mail Otomasyon — v30 (v29 + TCDD Tren Faturası Desteği)
 Gmail IMAP (App Password) + Sheets Service Account = Sonsuz token
 
-v29 Değişiklikleri (29 Nisan 2026):
+v30 Değişiklikleri:
+  - TCDD tren faturası desteği eklendi
+  - bize_ait_mi_kontrol: TCDD/DEVLET DEMIRYOLLARI/DEMIRYOLU → kesinlikle bize ait
+  - numaralari_regex_ile_cek: TCDD tespitinde 4 harf + 6 rakam pattern aktif
+    Format: PSSU982317-1 → PSSU982317 (sondaki -N strip edilir)
+    Sadece TCDD faturalarında aktif (geniş pattern yanlış eşleşme önlenir)
   - Yeni rakip firmalar: ZHEJIANG HAILIDE, KAMIN, BIRLA CARBON
   - Liman kontrolü: SAN PEDRO, ABIDJAN (POL)
   - Yükleyici mantığı zaten doğru (v28'de SHIPPER=Brisa → bize ait değil)
@@ -70,7 +75,7 @@ RAKIP_FIRMALAR = [
     # v24'te eklenen firmalar
     "SOUTHLAND",          # SOUTHLAND KATI COTE D'IVOIRE (SKCI) ve SOUTHLAND RUBBER CO.
     "SKCI",               # SOUTHLAND KATI kısa adı
-    "G T RUBBER",         # G T RUBBER CO.,LTD
+    "GT RUBBER",          # G T RUBBER CO.,LTD
     "IOI ACIDCHEM",       # IOI ACIDCHEM SDN. BHD.
     "RHODIA",             # RHODIA OPERATIONS
     "SAPH",               # SOCIETE AFRICAINE DE PLANTATIONS D'HEVEAS (her iki yazımı kapsar)
@@ -80,15 +85,6 @@ RAKIP_FIRMALAR = [
     "HAILIDE",            # Kısa adı
     "KAMIN",              # KAMIN
     "BIRLA CARBON",       # BIRLA CARBON EGYPT S.AE
-    "UNIMAC",             # UNIMAC RUBBER CO.,LTD.
-    "LANXESS",            # LANXESS BELGIUM NV
-    "ATOMEX",             # ATOMEX SIA
-    "NIPPON SEIRO",       # NIPPON SEIRO CO., LTD
-    "ORION ENGINEERED",   # ORION ENGINEERED CARBONS GMBH
-    "INABATA",            # INABATA & CO., LTD.
-    "SHANDONG DEREK",     # SHANDONG DEREK NEW MATERIALS CO.,LTD.
-    "FORMOSA",            # FORMOSA TAFFETA CO., LTD.
-    "EVONIK",             # EVONIK OPERATIONS GMBH
 ]
 
 # Eleme limanları (POL = Port of Loading)
@@ -324,11 +320,13 @@ def sheets_fatura_islendi_mi(servis, email_id):
 
 
 def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
-                             dosya_no="", fatura_url="", email_id="", kullanici=""):
+                             dosya_no="", fatura_url="", email_id="", kullanici="",
+                             fatura_no="", fatura_tarihi="", duzenleyen=""):
     """
     A=Geliş, B=Mail Tarihi, C=Gönderen, D=Konşimento, E=Konteyner,
     F=Beyanname, G=Durum, H=Dosya No, I=Fatura Linki,
-    J=İşlemi Yapan, K=Email ID, L=Kullanıcı
+    J=İşlemi Yapan, K=Email ID, L=Kullanıcı,
+    M=Fatura No, N=Fatura Tarihi, O=Düzenleyen Firma
     """
     try:
         servis = sheets_servis()
@@ -343,12 +341,13 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
 
         servis.spreadsheets().values().append(
             spreadsheetId=SHEETS_ID,
-            range="📑 Fatura Listesi!A:L",
+            range="📑 Fatura Listesi!A:O",
             valueInputOption="RAW",
             body={"values": [[
                 datetime.now().strftime("%d.%m.%Y %H:%M"),
                 tarih, gonderen, konsimento, konteyner, beyanname,
                 durum, dosya_no, fatura_url, "", email_id, kullanici,
+                fatura_no, fatura_tarihi, duzenleyen,
             ]]}
         ).execute()
         log.info(f"✅ Fatura Listesi güncellendi: {durum}")
@@ -600,6 +599,79 @@ def firma_adi_cek(icerik):
     return ""
 
 
+def fatura_meta_cek(icerik):
+    """
+    Fatura sayfasından fatura no, fatura tarihi ve düzenleyen firma adını çeker.
+    Tüm fatura tipleri için genel amaçlı.
+    Döner: {"fatura_no": str, "fatura_tarihi": str, "duzenleyen": str}
+    """
+    if not icerik:
+        return {"fatura_no": "", "fatura_tarihi": "", "duzenleyen": ""}
+
+    fatura_no     = ""
+    fatura_tarihi = ""
+    duzenleyen    = ""
+
+    # ── Fatura No ────────────────────────────────────────────
+    # "Fatura No" veya "Fatura Numarası" etiketinin yanındaki alfanümerik kod
+    # Örnek: DDY2026000014999, YLP2026..., GIB...
+    for pat in [
+        r'Fatura\s*No[:\s]+([A-Z0-9\-]{6,30})',
+        r'FATURA\s*NO[:\s]+([A-Z0-9\-]{6,30})',
+        r'Invoice\s*No[:\s]+([A-Z0-9\-]{6,30})',
+    ]:
+        m = re.search(pat, icerik, re.IGNORECASE)
+        if m:
+            fatura_no = m.group(1).strip()
+            break
+
+    # ── Fatura Tarihi ─────────────────────────────────────────
+    # Önce "Fatura Tarihi" etiketini ara, ardından yanındaki tarihi al
+    for pat in [
+        r'Fatura\s*Tarihi[:\s]+(\d{1,2}[-./]\d{1,2}[-./]\d{4})',
+        r'FATURA\s*TARIHI[:\s]+(\d{1,2}[-./]\d{1,2}[-./]\d{4})',
+        r'Invoice\s*Date[:\s]+(\d{1,2}[-./]\d{1,2}[-./]\d{4})',
+        r'Fatura\s*Tarihi[:\s]+(\d{4}[-./]\d{1,2}[-./]\d{1,2})',
+    ]:
+        m = re.search(pat, icerik, re.IGNORECASE)
+        if m:
+            fatura_tarihi = m.group(1).strip()
+            break
+
+    # ── Düzenleyen Firma ─────────────────────────────────────
+    # Sayfanın başındaki ilk büyük harf blok genellikle düzenleyen firmadır.
+    # "SAYFA" veya "FATURA" başlığından önce gelen ilk uzun satır.
+    # Birden fazla pattern — ilk tuturanı kullan.
+    for pat in [
+        r'(?:^|\n)\s*([A-ZÇĞİÖŞÜa-zçğışöşü][A-ZÇĞİÖŞÜa-zçğışöşü0-9\s\.\,\&\-]{10,100}?)\s*\n.*?(?:VKN|Vergi)',
+        r'([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ\s\.&,]{10,80}(?:LTD|A\.Ş|ANONİM|TİCARET|SANAYİ|MÜDÜRLÜĞü|MÜDÜRLÜĞÜ|GmbH|SRL|LLC|INC|CO\.)[\w\s\.]*)',
+        r'([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ\s\.&,]{10,80}(?:GENEL MÜDÜRLÜĞÜ|İŞLETMESİ|KURUMU))',
+    ]:
+        m = re.search(pat, icerik, re.IGNORECASE | re.DOTALL)
+        if m:
+            aday = m.group(1).strip()
+            # Çok satırlı geldiyse ilk satırı al
+            aday = aday.split('\n')[0].strip()
+            if len(aday) >= 10:
+                duzenleyen = aday[:100]
+                break
+
+    # Fallback: sayfanın ilk 300 karakterinde ilk uzun satır
+    if not duzenleyen:
+        ilk_kisim = icerik[:300]
+        for satir in ilk_kisim.split('\n'):
+            satir = satir.strip()
+            if len(satir) >= 15 and re.search(r'[A-ZÇĞİÖŞÜa-z]', satir):
+                duzenleyen = satir[:100]
+                break
+
+    return {
+        "fatura_no":     fatura_no,
+        "fatura_tarihi": fatura_tarihi,
+        "duzenleyen":    duzenleyen,
+    }
+
+
 def bize_ait_mi_kontrol(icerik, html_govde):
     """
     v29: Liman kontrolü + yükleyici mantığı düzeltildi
@@ -607,6 +679,10 @@ def bize_ait_mi_kontrol(icerik, html_govde):
     metin = turkce_normalize((icerik or "") + " " + (html_govde or ""))
 
     if "DLK" in metin:
+        return True, ""
+
+    # TCDD faturası → kesinlikle bize ait
+    if re.search(r'TCDD|DEVLET DEMIRYOLLARI|DEMIRYOLU', metin):
         return True, ""
 
     # Rakip firma kontrolü (v29: HAILIDE, KAMIN, BIRLA CARBON eklendi)
@@ -652,9 +728,19 @@ def numaralari_regex_ile_cek(metin):
 
     mu = metin.upper()
 
-    # Konteyner
+    # Konteyner (ISO 6346: 4 harf + 7 rakam)
     konteynerler = [k for k in set(re.findall(r'\b([A-Z]{4}[0-9]{7})\b', mu))
                     if not k.startswith('YLP')]
+
+    # TCDD tren konteyneri (4 harf + 6 rakam, sondaki -N strip edilir)
+    # Örnek: PSSU982317-1 → PSSU982317
+    # Sadece TCDD faturalarında aktif (geniş pattern yanlış eşleşme yapar)
+    if re.search(r'TCDD|DEVLET DEMIRYOLLARI|DEMIRYOLU', mu):
+        for m in re.finditer(r'\b([A-Z]{4}[0-9]{6})(?:-\d{1,2})?\b', mu):
+            kod = m.group(1)
+            if not kod.startswith('YLP') and kod not in konteynerler:
+                konteynerler.append(kod)
+                log.info(f"🚂 TCDD tren konteyneri bulundu: {kod}")
 
     # Beyanname
     tip_kodlari = ['IM', 'AN', 'EX', 'IH', 'TR', 'TI', 'AB', 'AT', 'EI']
@@ -829,6 +915,8 @@ def main():
             continue
 
         firma_adi = firma_adi_cek(icerik)
+        meta = fatura_meta_cek(icerik)
+        log.info(f"📄 Fatura meta → No: {meta['fatura_no']} | Tarih: {meta['fatura_tarihi']} | Düzenleyen: {meta['duzenleyen'][:40]}")
 
         bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, govde)
         if not bize_ait:
@@ -836,7 +924,9 @@ def main():
             sheets_faturaListesiYaz(
                 firma_adi or gonderen, tarih, None,
                 "🔴 Bize Ait Değil | " + sahip_olmama_sebebi,
-                fatura_url=url, email_id=email_id
+                fatura_url=url, email_id=email_id,
+                fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
+                duzenleyen=meta["duzenleyen"],
             )
             gmail_okundu_isaretle_imap(imap_num)
             continue
@@ -845,7 +935,9 @@ def main():
         if not numaralar:
             log.info(f"Numara bulunamadı: {konu}")
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, None,
-                                    "❌ Okunamadı", fatura_url=url, email_id=email_id)
+                                    "❌ Okunamadı", fatura_url=url, email_id=email_id,
+                                    fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
+                                    duzenleyen=meta["duzenleyen"])
             gmail_okundu_isaretle_imap(imap_num)
             okunamadi += 1
             continue
@@ -867,13 +959,17 @@ def main():
             sheets_faturaListesiYaz(
                 firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
                 dosya_no=dosyalar_str, fatura_url=url,
-                email_id=email_id, kullanici=kullanicilar_str
+                email_id=email_id, kullanici=kullanicilar_str,
+                fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
+                duzenleyen=meta["duzenleyen"],
             )
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar,
-                                    "🟡 Bekliyor", fatura_url=url, email_id=email_id)
+                                    "🟡 Bekliyor", fatura_url=url, email_id=email_id,
+                                    fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
+                                    duzenleyen=meta["duzenleyen"])
             beklemeye += 1
 
         gmail_okundu_isaretle_imap(imap_num)
