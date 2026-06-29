@@ -603,6 +603,14 @@ def fatura_meta_cek(icerik):
     """
     Fatura sayfasından fatura no, fatura tarihi ve düzenleyen firma adını çeker.
     Tüm fatura tipleri için genel amaçlı.
+
+    Sayfa yapısı (inner_text):
+      1. satır : "HS42026000008872 nolu fatura detay ekranı"  ← başlık (atla)
+      2. satır : "Türkiye Cumhuriyeti Devlet Demiryolları..." ← düzenleyen firma
+      ...
+      Sağ blok  : "Fatura No:\tKR22026000053685"
+                  "Fatura Tarihi:\t26.06.2026 00:00"
+
     Döner: {"fatura_no": str, "fatura_tarihi": str, "duzenleyen": str}
     """
     if not icerik:
@@ -612,58 +620,57 @@ def fatura_meta_cek(icerik):
     fatura_tarihi = ""
     duzenleyen    = ""
 
-    # ── Fatura No ────────────────────────────────────────────
-    # "Fatura No" veya "Fatura Numarası" etiketinin yanındaki alfanümerik kod
-    # Örnek: DDY2026000014999, YLP2026..., GIB...
-    for pat in [
-        r'Fatura\s*No[:\s]+([A-Z0-9\-]{6,30})',
-        r'FATURA\s*NO[:\s]+([A-Z0-9\-]{6,30})',
-        r'Invoice\s*No[:\s]+([A-Z0-9\-]{6,30})',
-    ]:
-        m = re.search(pat, icerik, re.IGNORECASE)
-        if m:
-            fatura_no = m.group(1).strip()
-            break
+    # Atlanacak satırlar (düzenleyen tespitinde)
+    ATLANACAK = {
+        "invoice", "e-fatura", "e-arşiv", "e-smm", "e-imzalıdır",
+        "e-imzalidir", "fatura", "sayın", "sayin",
+    }
+
+    # ── Fatura No ─────────────────────────────────────────────
+    # "Fatura No:" etiketinin hemen yanındaki değer
+    m = re.search(r'Fatura\s*No\s*[:\t]\s*([A-Z0-9\-]{6,30})', icerik, re.IGNORECASE)
+    if m:
+        fatura_no = m.group(1).strip()
 
     # ── Fatura Tarihi ─────────────────────────────────────────
-    # Önce "Fatura Tarihi" etiketini ara, ardından yanındaki tarihi al
-    for pat in [
-        r'Fatura\s*Tarihi[:\s]+(\d{1,2}[-./]\d{1,2}[-./]\d{4})',
-        r'FATURA\s*TARIHI[:\s]+(\d{1,2}[-./]\d{1,2}[-./]\d{4})',
-        r'Invoice\s*Date[:\s]+(\d{1,2}[-./]\d{1,2}[-./]\d{4})',
-        r'Fatura\s*Tarihi[:\s]+(\d{4}[-./]\d{1,2}[-./]\d{1,2})',
-    ]:
-        m = re.search(pat, icerik, re.IGNORECASE)
-        if m:
-            fatura_tarihi = m.group(1).strip()
-            break
+    # "Fatura Tarihi:" etiketinin yanındaki tarih — saat kısmını at
+    m = re.search(
+        r'Fatura\s*Tarihi\s*[:\t]\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})',
+        icerik, re.IGNORECASE
+    )
+    if m:
+        fatura_tarihi = m.group(1).strip()
 
     # ── Düzenleyen Firma ─────────────────────────────────────
-    # Sayfanın başındaki ilk büyük harf blok genellikle düzenleyen firmadır.
-    # "SAYFA" veya "FATURA" başlığından önce gelen ilk uzun satır.
-    # Birden fazla pattern — ilk tuturanı kullan.
-    for pat in [
-        r'(?:^|\n)\s*([A-ZÇĞİÖŞÜa-zçğışöşü][A-ZÇĞİÖŞÜa-zçğışöşü0-9\s\.\,\&\-]{10,100}?)\s*\n.*?(?:VKN|Vergi)',
-        r'([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ\s\.&,]{10,80}(?:LTD|A\.Ş|ANONİM|TİCARET|SANAYİ|MÜDÜRLÜĞü|MÜDÜRLÜĞÜ|GmbH|SRL|LLC|INC|CO\.)[\w\s\.]*)',
-        r'([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ\s\.&,]{10,80}(?:GENEL MÜDÜRLÜĞÜ|İŞLETMESİ|KURUMU))',
-    ]:
-        m = re.search(pat, icerik, re.IGNORECASE | re.DOTALL)
-        if m:
-            aday = m.group(1).strip()
-            # Çok satırlı geldiyse ilk satırı al
-            aday = aday.split('\n')[0].strip()
-            if len(aday) >= 10:
-                duzenleyen = aday[:100]
-                break
+    # Sayfa başlığı ("XXX nolu fatura detay ekranı") atlanır,
+    # ardından gelen ilk anlamlı satır düzenleyen firmadır.
+    satirlar = icerik.split('\n')
+    baslik_gecildi = False
+    for satir in satirlar[:30]:  # İlk 30 satıra bak
+        satir = satir.strip()
+        if not satir:
+            continue
 
-    # Fallback: sayfanın ilk 300 karakterinde ilk uzun satır
-    if not duzenleyen:
-        ilk_kisim = icerik[:300]
-        for satir in ilk_kisim.split('\n'):
-            satir = satir.strip()
-            if len(satir) >= 15 and re.search(r'[A-ZÇĞİÖŞÜa-z]', satir):
-                duzenleyen = satir[:100]
-                break
+        # Başlık satırını atla
+        if re.search(r'nolu fatura detay', satir, re.IGNORECASE):
+            baslik_gecildi = True
+            continue
+
+        # Başlık henüz görülmediyse atla
+        if not baslik_gecildi:
+            continue
+
+        # Anlamsız / genel kelimeleri atla
+        satir_lower = satir.lower()
+        if satir_lower in ATLANACAK:
+            continue
+        if re.match(r'^[\d\s\.\-\:\/]+$', satir):  # Sadece rakam/noktalama
+            continue
+        if len(satir) < 8:
+            continue
+
+        duzenleyen = satir[:100]
+        break
 
     return {
         "fatura_no":     fatura_no,
