@@ -321,12 +321,12 @@ def sheets_fatura_islendi_mi(servis, email_id):
 
 def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
                              dosya_no="", fatura_url="", email_id="", kullanici="",
-                             fatura_no="", fatura_tarihi="", duzenleyen=""):
+                             fatura_no="", duzenleyen=""):
     """
     A=Geliş, B=Mail Tarihi, C=Gönderen, D=Konşimento, E=Konteyner,
     F=Beyanname, G=Durum, H=Dosya No, I=Fatura Linki,
     J=İşlemi Yapan, K=Email ID, L=Kullanıcı,
-    M=Fatura No, N=Fatura Tarihi, O=Düzenleyen Firma
+    M=Fatura No, N=Düzenleyen Firma
     """
     try:
         servis = sheets_servis()
@@ -347,7 +347,7 @@ def sheets_faturaListesiYaz(gonderen, tarih, numaralar, durum,
                 datetime.now().strftime("%d.%m.%Y %H:%M"),
                 tarih, gonderen, konsimento, konteyner, beyanname,
                 durum, dosya_no, fatura_url, "", email_id, kullanici,
-                fatura_no, fatura_tarihi, duzenleyen,
+                fatura_no, duzenleyen,
             ]]}
         ).execute()
         log.info(f"✅ Fatura Listesi güncellendi: {durum}")
@@ -599,83 +599,41 @@ def firma_adi_cek(icerik):
     return ""
 
 
-def fatura_meta_cek(icerik):
+def fatura_meta_cek(html_govde):
     """
-    Fatura sayfasından fatura no, fatura tarihi ve düzenleyen firma adını çeker.
-    Tüm fatura tipleri için genel amaçlı.
+    Mail içindeki edoksis tablosundan fatura no ve düzenleyen firmayı çeker.
+    Fatura tarihi kaldırıldı.
 
-    Sayfa yapısı (inner_text):
-      1. satır : "HS42026000008872 nolu fatura detay ekranı"  ← başlık (atla)
-      2. satır : "Türkiye Cumhuriyeti Devlet Demiryolları..." ← düzenleyen firma
-      ...
-      Sağ blok  : "Fatura No:\tKR22026000053685"
-                  "Fatura Tarihi:\t26.06.2026 00:00"
+    Mail HTML yapısı:
+      Fatura No:     | HS42026000008872
+      Gönderen:      | HAVAALANLARI YER HİZMETLERİ A.Ş.
 
-    Döner: {"fatura_no": str, "fatura_tarihi": str, "duzenleyen": str}
+    Döner: {"fatura_no": str, "duzenleyen": str}
     """
-    if not icerik:
-        return {"fatura_no": "", "fatura_tarihi": "", "duzenleyen": ""}
+    if not html_govde:
+        return {"fatura_no": "", "duzenleyen": ""}
 
-    fatura_no     = ""
-    fatura_tarihi = ""
-    duzenleyen    = ""
+    fatura_no  = ""
+    duzenleyen = ""
 
-    # Atlanacak satırlar (düzenleyen tespitinde)
-    ATLANACAK = {
-        "invoice", "e-fatura", "e-arşiv", "e-smm", "e-imzalıdır",
-        "e-imzalidir", "fatura", "sayın", "sayin",
-    }
+    # HTML etiketlerini temizle
+    temiz = re.sub(r'<[^>]+>', ' ', html_govde)
+    # Çoklu boşlukları tek boşluğa indir
+    temiz = re.sub(r'[ \t]+', ' ', temiz)
 
-    # ── Fatura No ─────────────────────────────────────────────
-    # "Fatura No:" etiketinin hemen yanındaki değer
-    m = re.search(r'Fatura\s*No\s*[:\t]\s*([A-Z0-9\-]{6,30})', icerik, re.IGNORECASE)
+    # Fatura No
+    m = re.search(r'Fatura\s*No\s*[:\s]+([A-Z0-9\-]{6,30})', temiz, re.IGNORECASE)
     if m:
         fatura_no = m.group(1).strip()
 
-    # ── Fatura Tarihi ─────────────────────────────────────────
-    # "Fatura Tarihi:" etiketinin yanındaki tarih — saat kısmını at
-    m = re.search(
-        r'Fatura\s*Tarihi\s*[:\t]\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})',
-        icerik, re.IGNORECASE
-    )
+    # Gönderen (düzenleyen firma)
+    m = re.search(r'Gönderen\s*[:\s]+([A-ZÇĞİÖŞÜa-zçğışöşü0-9\s\.\,\&\-]{5,100})', temiz, re.IGNORECASE)
     if m:
-        fatura_tarihi = m.group(1).strip()
-
-    # ── Düzenleyen Firma ─────────────────────────────────────
-    # Sayfa başlığı ("XXX nolu fatura detay ekranı") atlanır,
-    # ardından gelen ilk anlamlı satır düzenleyen firmadır.
-    satirlar = icerik.split('\n')
-    baslik_gecildi = False
-    for satir in satirlar[:30]:  # İlk 30 satıra bak
-        satir = satir.strip()
-        if not satir:
-            continue
-
-        # Başlık satırını atla
-        if re.search(r'nolu fatura detay', satir, re.IGNORECASE):
-            baslik_gecildi = True
-            continue
-
-        # Başlık henüz görülmediyse atla
-        if not baslik_gecildi:
-            continue
-
-        # Anlamsız / genel kelimeleri atla
-        satir_lower = satir.lower()
-        if satir_lower in ATLANACAK:
-            continue
-        if re.match(r'^[\d\s\.\-\:\/]+$', satir):  # Sadece rakam/noktalama
-            continue
-        if len(satir) < 8:
-            continue
-
-        duzenleyen = satir[:100]
-        break
+        duzenleyen = m.group(1).strip()[:100]
 
     return {
-        "fatura_no":     fatura_no,
-        "fatura_tarihi": fatura_tarihi,
-        "duzenleyen":    duzenleyen,
+        "fatura_no":  fatura_no,
+        "duzenleyen": duzenleyen,
     }
 
 
@@ -922,8 +880,8 @@ def main():
             continue
 
         firma_adi = firma_adi_cek(icerik)
-        meta = fatura_meta_cek(icerik)
-        log.info(f"📄 Fatura meta → No: {meta['fatura_no']} | Tarih: {meta['fatura_tarihi']} | Düzenleyen: {meta['duzenleyen'][:40]}")
+        meta = fatura_meta_cek(govde)
+        log.info(f"📄 Fatura meta → No: {meta['fatura_no']} | Düzenleyen: {meta['duzenleyen'][:40]}")
 
         bize_ait, sahip_olmama_sebebi = bize_ait_mi_kontrol(icerik, govde)
         if not bize_ait:
@@ -932,8 +890,7 @@ def main():
                 firma_adi or gonderen, tarih, None,
                 "🔴 Bize Ait Değil | " + sahip_olmama_sebebi,
                 fatura_url=url, email_id=email_id,
-                fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
-                duzenleyen=meta["duzenleyen"],
+                fatura_no=meta["fatura_no"], duzenleyen=meta["duzenleyen"],
             )
             gmail_okundu_isaretle_imap(imap_num)
             continue
@@ -943,8 +900,7 @@ def main():
             log.info(f"Numara bulunamadı: {konu}")
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, None,
                                     "❌ Okunamadı", fatura_url=url, email_id=email_id,
-                                    fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
-                                    duzenleyen=meta["duzenleyen"])
+                                    fatura_no=meta["fatura_no"], duzenleyen=meta["duzenleyen"])
             gmail_okundu_isaretle_imap(imap_num)
             okunamadi += 1
             continue
@@ -967,16 +923,14 @@ def main():
                 firma_adi or gonderen, tarih, numaralar, "✅ Eşleşti",
                 dosya_no=dosyalar_str, fatura_url=url,
                 email_id=email_id, kullanici=kullanicilar_str,
-                fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
-                duzenleyen=meta["duzenleyen"],
+                fatura_no=meta["fatura_no"], duzenleyen=meta["duzenleyen"],
             )
             eslesti += 1
         else:
             db_bekleyen_ekle(conn, email_id, gonderen, konu, tarih, numaralar)
             sheets_faturaListesiYaz(firma_adi or gonderen, tarih, numaralar,
                                     "🟡 Bekliyor", fatura_url=url, email_id=email_id,
-                                    fatura_no=meta["fatura_no"], fatura_tarihi=meta["fatura_tarihi"],
-                                    duzenleyen=meta["duzenleyen"])
+                                    fatura_no=meta["fatura_no"], duzenleyen=meta["duzenleyen"])
             beklemeye += 1
 
         gmail_okundu_isaretle_imap(imap_num)
